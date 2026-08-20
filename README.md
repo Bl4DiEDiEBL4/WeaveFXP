@@ -7,6 +7,10 @@ automation from tools on your LAN.
 The app runs as one executable. Start `WeaveFXP.exe`, open the web UI, and the
 engine runs in the same process.
 
+<img width="2552" height="1274" alt="image" src="https://github.com/user-attachments/assets/e33d9bc4-8c23-4e71-a291-942f81c1a47a" />
+
+<img width="2552" height="1274" alt="image" src="https://github.com/user-attachments/assets/40e7a846-3320-4c74-bc23-4db16cb6ebd9" />
+
 ## Download And Start
 
 Choose the release for your machine:
