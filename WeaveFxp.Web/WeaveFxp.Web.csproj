@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>WeaveFxp.Web</RootNamespace>
+    <AssemblyName>WeaveFXP</AssemblyName>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Single self-contained exe on publish.
+         Use the root publish.bat to emit Release\<runtime>\WeaveFXP(.exe). -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+
+    <!-- Workstation GC: ASP.NET defaults to Server GC, which trades memory for
+         throughput and will happily sit on gigabytes of churned heap. This app is a
+         single-user control panel - keep the footprint small. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RuntimeIdentifiers>win-x64;linux-x64;linux-arm64</RuntimeIdentifiers>
+    <ApplicationIcon>Assets\WeaveFXP.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WeaveFxp.Engine\WeaveFxp.Engine.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Update="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="wwwroot\app.css" LogicalName="WeaveFxp.Web.wwwroot.app.css" />
+    <EmbeddedResource Include="wwwroot\favicon.ico" LogicalName="WeaveFxp.Web.wwwroot.favicon.ico" />
+    <EmbeddedResource Include="wwwroot\icon-192.png" LogicalName="WeaveFxp.Web.wwwroot.icon-192.png" />
+    <EmbeddedResource Include="wwwroot\icon-512.png" LogicalName="WeaveFxp.Web.wwwroot.icon-512.png" />
+    <EmbeddedResource Include="wwwroot\weavefxp-logo.svg" LogicalName="WeaveFxp.Web.wwwroot.weavefxp-logo.svg" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Remove="bin\**\*;obj\**\*;data\**\*" />
+    <None Remove="bin\**\*;obj\**\*;data\**\*" />
+  </ItemGroup>
+
+</Project>

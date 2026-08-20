@@ -1,0 +1,100 @@
+@page "/logs"
+@implements IDisposable
+@inject WeaveEngine Engine
+
+<h1 class="visually-hidden">Logs</h1>
+
+<div class="page logs-page">
+    <header class="page-head page-head-lg">
+        <div>
+            <div class="eyebrow">Runtime</div>
+            <h2><span class="title-icon">≡</span> Logs</h2>
+            <p class="page-sub">System, API, FTP and transfer events.</p>
+        </div>
+        <div class="page-actions">
+            <button class="secondary" @onclick="Refresh"><span class="btn-icon">↻</span> Refresh</button>
+        </div>
+    </header>
+
+    <section class="content-panel">
+        <div class="toolbar">
+            <select @bind="_category" @bind:after="Refresh">
+                <option value="">All categories</option>
+                <option value="system">System</option>
+                <option value="api">API</option>
+                <option value="ftp">FTP</option>
+                <option value="transfer">Transfer</option>
+            </select>
+            <select @bind="_level" @bind:after="Refresh">
+                <option value="">All levels</option>
+                <option value="info">Info</option>
+                <option value="warn">Warn</option>
+                <option value="error">Error</option>
+            </select>
+            <input placeholder="Search message/site..." @bind="_query" @bind:event="oninput" />
+            <label class="chk"><input type="checkbox" @bind="_live" /> Live</label>
+            <span class="spacer"></span>
+            <select class="page-size" @bind="_limit" @bind:after="Refresh">
+                <option value="100">100 lines</option>
+                <option value="250">250 lines</option>
+                <option value="500">500 lines</option>
+                <option value="1000">1000 lines</option>
+            </select>
+        </div>
+
+        <div class="table-wrap">
+            <table class="data-table logs-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Type</th>
+                        <th>Level</th>
+                        <th>Site</th>
+                        <th>Message</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var entry in Filtered)
+                    {
+                        <tr class="lvl-@entry.Level">
+                            <td class="mono">@entry.Time.ToLocalTime().ToString("HH:mm:ss")</td>
+                            <td>@entry.Category</td>
+                            <td><span class="pill @LevelClass(entry.Level)">@entry.Level</span></td>
+                            <td>@entry.Site</td>
+                            <td class="mono msg">@entry.Message</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+
+@code {
+    private List<LogEntry> _logs = new();
+    private string _category = "";
+    private string _level = "";
+    private string _query = "";
+    private int _limit = 500;
+    private bool _live = true;
+
+    private IEnumerable<LogEntry> Filtered => _logs
+        .Where(e => string.IsNullOrWhiteSpace(_query) ||
+            $"{e.Category} {e.Level} {e.Site} {e.Message}".Contains(_query, StringComparison.OrdinalIgnoreCase));
+
+    protected override void OnInitialized()
+    {
+        Engine.Changed += OnChanged;
+        Refresh();
+    }
+
+    private void OnChanged()
+    {
+        if (!_live) return;
+        InvokeAsync(() => { Refresh(); StateHasChanged(); });
+    }
+
+    private void Refresh() => _logs = Engine.RecentLogs(_limit, _category, _level);
+    private static string LevelClass(string level) => level switch { "error" => "off", "warn" => "busy", _ => "on" };
+    public void Dispose() => Engine.Changed -= OnChanged;
+}

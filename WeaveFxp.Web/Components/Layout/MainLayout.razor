@@ -1,0 +1,116 @@
+@inherits LayoutComponentBase
+@inject Microsoft.Extensions.Hosting.IHostApplicationLifetime AppLifetime
+
+<div class="app">
+    <aside class="sidebar">
+        <div class="brand">
+            <img class="brand-logo" src="weavefxp-logo.svg" alt="" />
+            <div>
+                <div class="brand-name">WEAVE<span>FXP</span></div>
+                <div class="brand-meta">v1.0.0 | web fxp</div>
+            </div>
+        </div>
+
+        <section class="status-card">
+            <div class="status-title">ENGINE STATUS</div>
+            <div class="status-line"><span class="status-dot on"></span> Running</div>
+            <button class="status-action danger" @onclick="StopEngine">
+                <span class="nav-glyph">■</span>
+                Stop engine
+            </button>
+        </section>
+
+        <nav class="menus" aria-label="Main menu">
+            <div class="menu">
+                <div class="menu-title">Menu</div>
+                <div class="menu-items">
+                    <NavLink class="nav-item" href="" Match="NavLinkMatch.All">
+                        <span class="nav-glyph">◈</span>
+                        Dashboard
+                    </NavLink>
+                    <NavLink class="nav-item" href="browser">
+                        <span class="nav-glyph">⇄</span>
+                        Browse
+                    </NavLink>
+                    <NavLink class="nav-item" href="races">
+                        <span class="nav-glyph">⚑</span>
+                        Races
+                    </NavLink>
+                </div>
+            </div>
+            <div class="menu">
+                <div class="menu-title">Sites</div>
+                <div class="menu-items">
+                    <NavLink class="nav-item" href="sites">
+                        <span class="nav-glyph">▤</span>
+                        Site Manager
+                    </NavLink>
+                </div>
+            </div>
+            <div class="menu">
+                <div class="menu-title">Tools</div>
+                <div class="menu-items">
+                    <NavLink class="nav-item" href="stats">
+                        <span class="nav-glyph">◔</span>
+                        Stats
+                    </NavLink>
+                    <NavLink class="nav-item" href="history">
+                        <span class="nav-glyph">◷</span>
+                        History
+                    </NavLink>
+                    <NavLink class="nav-item" href="logs">
+                        <span class="nav-glyph">≡</span>
+                        Logs
+                    </NavLink>
+                    <NavLink class="nav-item" href="api-docs">
+                        <span class="nav-glyph">⌘</span>
+                        API
+                    </NavLink>
+                    <NavLink class="nav-item" href="settings">
+                        <span class="nav-glyph">⚙</span>
+                        Settings
+                    </NavLink>
+                    <NavLink class="nav-item" href="changelog">
+                        <span class="nav-glyph">▣</span>
+                        Changelog
+                    </NavLink>
+                </div>
+            </div>
+        </nav>
+    </aside>
+
+    <section class="shell-content">
+        <header class="app-header">
+            <div class="header-title">
+                <span>WEB FXP CLIENT</span>
+                <strong>WeaveFXP</strong>
+            </div>
+            <div class="header-actions">
+                <NavLink class="top-btn" href="browser">
+                    <span class="btn-icon">⇄</span>
+                    Browse
+                </NavLink>
+                <NavLink class="top-btn" href="sites">
+                    <span class="btn-icon">＋</span>
+                    Add site
+                </NavLink>
+                <NavLink class="top-btn" href="api-docs">
+                    <span class="btn-icon">⌘</span>
+                    API
+                </NavLink>
+                <NavLink class="top-btn danger" href="settings">
+                    <span class="btn-icon">⚙</span>
+                    Settings
+                </NavLink>
+            </div>
+        </header>
+
+        <main class="app-main">
+            @Body
+        </main>
+    </section>
+</div>
+
+@code {
+    private void StopEngine() => AppLifetime.StopApplication();
+}

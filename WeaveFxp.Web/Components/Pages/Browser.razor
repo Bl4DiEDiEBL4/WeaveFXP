@@ -1,0 +1,1289 @@
+@page "/browser"
+@implements IDisposable
+@using WeaveFxp.Web.Services
+@inject WeaveEngine Engine
+@inject IJSRuntime Js
+
+<h1 class="visually-hidden">Browser</h1>
+
+<div class="browser-page" style="@BrowserStyle" @ref="_browserRoot">
+    <nav class="browser-tabs" aria-label="Browser tabs">
+        @foreach (var tab in _browserTabs)
+        {
+            <div class="@BrowserTabClass(tab)">
+                <button class="browser-tab-main" title="@TabTitle(tab)" @onclick="() => ActivateBrowserTab(tab.Id)">
+                    <span class="browser-tab-title">@tab.Title</span>
+                    <span class="browser-tab-sub">@TabMeta(tab)</span>
+                </button>
+                @if (_browserTabs.Count > 1)
+                {
+                    <button class="browser-tab-close" title="Close tab" @onclick="() => CloseBrowserTab(tab.Id)">×</button>
+                }
+            </div>
+        }
+        <button class="browser-tab-add" title="New browser tab" @onclick="AddManualBrowserTab">
+            <span class="btn-icon">＋</span>
+            New browse
+        </button>
+    </nav>
+
+    <div class="browsers">
+        <PaneView Pane="Active.Left" Sites="_sites"
+                  OnSiteSelected="s => ConnectPane(Active.Left, s)"
+                  OnSectionSelected="s => JumpSection(Active.Left, s)"
+                  OnPathChanged="p => SetPanePath(Active.Left, p)"
+                  OnConnect="() => ListPane(Active.Left)"
+                  OnDisconnect="() => DisconnectPane(Active.Left)"
+                  OnUp="() => GoUp(Active.Left)"
+                  OnGo="() => ListPane(Active.Left)"
+                  OnSfv="() => Sfv(Active.Left)"
+                  OnDownload="() => Download(Active.Left)"
+                  OnOpen="i => OpenEntry(Active.Left, i)"
+                  OnSelect="t => ToggleSelect(Active.Left, t.Item1, t.Item2)"
+                  OnSort="c => SortPane(Active.Left, c)"
+                  OnContext="t => ShowContext(Active.Left, t.Item1, t.Item2)" />
+
+        <div class="pane-mid">
+            <button class="fxp-btn" title="FXP selected: left to right" @onclick="() => QueueFxp(Active.Left, Active.Right)">▶</button>
+            <button type="button" class="split-control" title="Drag to resize browses"
+                    @onpointerdown="StartSplitDrag" @onpointerdown:preventDefault="true">
+                <span class="split-line"></span>
+                <span class="split-readout">@Active.SplitPct%</span>
+                <span class="split-line"></span>
+            </button>
+            <button class="fxp-btn" title="FXP selected: right to left" @onclick="() => QueueFxp(Active.Right, Active.Left)">◀</button>
+        </div>
+
+        <PaneView Pane="Active.Right" Sites="_sites"
+                  OnSiteSelected="s => ConnectPane(Active.Right, s)"
+                  OnSectionSelected="s => JumpSection(Active.Right, s)"
+                  OnPathChanged="p => SetPanePath(Active.Right, p)"
+                  OnConnect="() => ListPane(Active.Right)"
+                  OnDisconnect="() => DisconnectPane(Active.Right)"
+                  OnUp="() => GoUp(Active.Right)"
+                  OnGo="() => ListPane(Active.Right)"
+                  OnSfv="() => Sfv(Active.Right)"
+                  OnDownload="() => Download(Active.Right)"
+                  OnOpen="i => OpenEntry(Active.Right, i)"
+                  OnSelect="t => ToggleSelect(Active.Right, t.Item1, t.Item2)"
+                  OnSort="c => SortPane(Active.Right, c)"
+                  OnContext="t => ShowContext(Active.Right, t.Item1, t.Item2)" />
+    </div>
+
+    <section class="bottom">
+        <div class="bottom-views">
+            @if (_tab == "queue")
+            {
+                <div class="rows">
+                    @if (ManualJobs().Count == 0)
+                    {
+                        <div class="empty-row">No manual jobs yet. Select files and use the arrows, or DL to download locally. Races live on the Races page.</div>
+                    }
+                    else
+                    {
+                        @foreach (var job in ManualJobs().Take(60))
+                        {
+                            <details class="job-row">
+                                <summary @oncontextmenu="e => ShowJobContext(job, e)" @oncontextmenu:preventDefault="true">
+                                    <span class="badge @StateClass(job.State)">@job.State.ToString().ToLowerInvariant()</span>
+                                    <span class="job-route job-open" title="Double-click to open in browser"
+                                          @ondblclick="() => OpenJobTab(job)"
+                                          @ondblclick:stopPropagation="true" @ondblclick:preventDefault="true">@job.Request.FromSite → @job.Request.ToSite</span>
+                                    <span class="job-path job-open"
+                                          @ondblclick="() => OpenJobTab(job)"
+                                          @ondblclick:stopPropagation="true" @ondblclick:preventDefault="true">@job.Request.SourcePath → @job.Request.DestPath</span>
+                                    <span class="job-meta">@job.Type.ToString().ToLowerInvariant() · @job.CreatedAt.ToLocalTime().ToString("HH:mm:ss")</span>
+                                    @if (job.Paused)
+                                    {
+                                        <span class="badge amber">paused</span>
+                                    }
+                                    @if (job.State == JobState.Running)
+                                    {
+                                        <span class="job-prog">
+                                            <span class="job-bar">
+                                                <span class="job-bar-fill @(job.Percent < 0 ? "indet" : "")"
+                                                      style="width:@(job.Percent < 0 ? 100 : job.Percent)%"></span>
+                                            </span>
+                                            <span class="job-prog-text">@ProgressText(job)</span>
+                                        </span>
+                                    }
+                                    else if (job.FilesDone > 0 || job.CumulativeBytes > 0)
+                                    {
+                                        <span class="job-tally">@job.FilesDone file(s) · @HumanSize(job.CumulativeBytes) raced</span>
+                                    }
+                                </summary>
+                                @if (job.State == JobState.Running && job.Slots.Count > 0)
+                                {
+                                    <div class="job-threads">
+                                        @foreach (var slot in job.Slots)
+                                        {
+                                            <div class="job-thread">
+                                                <span class="jt-label">T@(slot.Slot)</span>
+                                                <span class="jt-file" title="@slot.File">@slot.File</span>
+                                                <span class="job-bar jt-bar">
+                                                    <span class="job-bar-fill @(slot.Percent < 0 ? "indet" : "")"
+                                                          style="width:@(slot.Percent < 0 ? 100 : slot.Percent)%"></span>
+                                                </span>
+                                                <span class="jt-stats">
+                                                    @(slot.Percent >= 0 ? $"{slot.Percent}%" : "…") ·
+                                                    @HumanSize(slot.Done)@(slot.Total > 0 ? $"/{HumanSize(slot.Total)}" : "") ·
+                                                    @Speed(slot.Bps)
+                                                </span>
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                                <ul class="events">
+                                    @foreach (var ev in job.Events.TakeLast(200))
+                                    {
+                                        <li class="lvl-@ev.Level">[@ev.Time.ToLocalTime().ToString("HH:mm:ss")] @ev.Level: @ev.Message</li>
+                                    }
+                                </ul>
+                            </details>
+                        }
+                    }
+                </div>
+            }
+            else
+            {
+                <div class="logview">
+                    @foreach (var e in _logs.Where(l => l.Category == LogCategoryFor(_tab)).TakeLast(400))
+                    {
+                        <div class="logline @LogLineClass(e)">
+                            <span class="log-time">@e.Time.ToLocalTime().ToString("HH:mm:ss")</span>
+                            <span class="log-source">@LogSource(e)</span>
+                            <span class="log-message">@e.Message</span>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+        <nav class="bottom-tabs">
+            <button class="btab @(_tab == "queue" ? "active" : "")" @onclick='() => _tab = "queue"'><span class="tab-icon">▦</span> Queue @(ActiveJobs() > 0 ? $"({ActiveJobs()})" : "")</button>
+            <button class="btab @(_tab == "ftp" ? "active" : "")" @onclick='() => _tab = "ftp"'><span class="tab-icon">⌁</span> FTP Log</button>
+            <button class="btab @(_tab == "transfer" ? "active" : "")" @onclick='() => _tab = "transfer"'><span class="tab-icon">⇄</span> Transfer Log</button>
+            <button class="btab @(_tab == "system" ? "active" : "")" @onclick='() => _tab = "system"'><span class="tab-icon">◎</span> System Log</button>
+            <span class="spacer"></span>
+            <label class="resize-label">Log height <input class="bottom-range" type="range" min="18" max="52" @bind="Active.BottomVh" @bind:event="oninput" /></label>
+        </nav>
+    </section>
+</div>
+
+@if (_contextOpen)
+{
+    <div class="context-backdrop" @onclick="HideContext"></div>
+    <div class="context-menu" style="left:@_contextXpx; top:@_contextYpx">
+        <div class="context-title">@ContextTitle()</div>
+        @if (_contextKind == ContextKind.Queue)
+        {
+            <button @onclick="RestartContextJob" disabled="@(!CanRestartContextJob())">Restart</button>
+            <button @onclick="RetryContextJob" disabled="@(!CanRetryContextJob())">Retry</button>
+            @if (ContextJob?.Paused == true)
+            {
+                <button @onclick="ResumeContextJob">Resume</button>
+            }
+            else
+            {
+                <button @onclick="PauseContextJob" disabled="@(!CanCancelContextJob())">Pause</button>
+            }
+            <button @onclick="CancelContextJob" disabled="@(!CanCancelContextJob())">Stop</button>
+            <button @onclick="RemoveContextJob">Remove</button>
+            <button @onclick="OpenCommandShellForQueue">Command Shell</button>
+        }
+        else
+        {
+            @* Items adapt to what was right-clicked: a folder, a file, or empty space. *@
+            @if (ContextEntry() is { } entry)
+            {
+                @if (entry.Type == "dir")
+                {
+                    <button @onclick="OpenContextEntry">Open</button>
+                }
+                <button disabled="@(!CanTransfer(_contextPane))" @onclick="() => TransferFromContext(false)">Transfer to @OtherSideName(_contextPane)</button>
+                <button disabled="@(!CanTransfer(_contextPane))" @onclick="() => TransferFromContext(true)">Queue transfer to @OtherSideName(_contextPane)</button>
+                <button disabled="@(_contextPane is null || string.IsNullOrEmpty(_contextPane.Site))" @onclick="DownloadContext">Download</button>
+                <div class="context-sep"></div>
+                <button @onclick="() => OpenCommandShell(ChmodCommand())">Chmod 755…</button>
+                @if (entry.Type == "dir")
+                {
+                    <button @onclick="() => OpenCommandShell(NukeCommand())">Nuke…</button>
+                    <button @onclick="CheckContextSfv">Check SFV Here</button>
+                }
+            }
+            else
+            {
+                @* Empty space: whole-directory / connection actions only. *@
+                <button @onclick="CheckContextSfv">Check SFV Here</button>
+            }
+            <div class="context-sep"></div>
+            <button @onclick="() => OpenCommandShell()">Command Shell</button>
+            <button @onclick='() => OpenCommandShell("SITE WHO")'>SITE WHO</button>
+            <button @onclick='() => OpenCommandShell("SITE INVITE ")'>Invite…</button>
+            <button @onclick="RefreshContextPane">Refresh</button>
+        }
+    </div>
+}
+
+@if (_shellOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseShell"></div>
+    <section class="modal shell-modal">
+        <header>
+            <h3>Command Shell</h3>
+            <button class="secondary icon-btn" title="Close" @onclick="CloseShell">×</button>
+        </header>
+        <div class="form-grid">
+            <label>Site<input readonly value="@_shellSite" /></label>
+            <label class="wide">Raw FTP command<input @bind="_shellCommand" @bind:event="oninput" placeholder="SITE WHO" /></label>
+        </div>
+        <div class="modal-actions">
+            <button @onclick="ExecuteShell"><span class="btn-icon">▶</span> Execute</button>
+            <button class="secondary" @onclick="CloseShell">Cancel</button>
+        </div>
+        @if (!string.IsNullOrEmpty(_shellResult))
+        {
+            <pre class="console">@_shellResult</pre>
+        }
+    </section>
+}
+
+@if (_toast is not null)
+{
+    <div class="toast show" @key="_toast">@_toast</div>
+}
+
+@code {
+    private readonly List<BrowserTab> _browserTabs = new() { new BrowserTab("main", "Main") };
+    private readonly Dictionary<string, string> _raceJobTabs = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _dismissedRaceJobs = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _terminalJobsSeen = new(StringComparer.OrdinalIgnoreCase);
+    private ElementReference _browserRoot;
+    private DotNetObjectReference<Browser>? _selfRef;
+    private List<Site> _sites = new();
+    private List<Job> _jobs = new();
+    private readonly List<LogEntry> _logs = new();
+    private long _logSeq;
+    private string _tab = "queue";
+    private string? _toast;
+    private string _activeBrowserTabId = "main";
+    private int _browserTabSeq = 1;
+    private bool _contextOpen;
+    private string _contextXpx = "0px";
+    private string _contextYpx = "0px";
+    private ContextKind _contextKind;
+    private PaneModel? _contextPane;
+    private int _contextIndex = -1;
+    private string _contextJobId = "";
+    private bool _shellOpen;
+    private string _shellSite = "";
+    private string _shellLogAlias = "";
+    private string _shellCommand = "";
+    private string _shellResult = "";
+    private bool _browserStorageReady;
+    private bool _restoringBrowserState;
+    private const string BrowserStateKey = "weavefxp.browser.v1";
+    private static readonly System.Text.Json.JsonSerializerOptions BrowserStateJson = new()
+    {
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+    };
+
+    private BrowserTab Active => _browserTabs.FirstOrDefault(t => t.Id == _activeBrowserTabId) ?? _browserTabs[0];
+    private string BrowserStyle => $"--split-left:{Active.SplitPct}%; --bottom-h:{Active.BottomVh}vh;";
+
+    protected override void OnInitialized()
+    {
+        _sites = Engine.Sites(true);
+        _jobs = Engine.Jobs();
+        foreach (var job in _jobs.Where(j => j.Terminal))
+            _terminalJobsSeen.Add(job.Id);
+        Engine.Changed += OnEngineChanged;
+        PullLogs();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _browserStorageReady = true;
+            await RestoreBrowserStateAsync();
+        }
+        // Auto-scroll the log panes (FTP/Transfer/System log + job event lists) to the
+        // newest line — unless the user has scrolled up more than ~160px to read back.
+        try
+        {
+            await Js.InvokeVoidAsync("eval",
+                "document.querySelectorAll('.logview,.events').forEach(function(e){if(e.scrollHeight-e.scrollTop-e.clientHeight<160)e.scrollTop=e.scrollHeight;})");
+        }
+        catch { /* circuit closing */ }
+    }
+
+    public void Dispose()
+    {
+        Engine.Changed -= OnEngineChanged;
+        _selfRef?.Dispose();
+    }
+
+    private void OnEngineChanged()
+    {
+        var jobs = Engine.Jobs();
+        _ = InvokeAsync(async () =>
+        {
+            _jobs = jobs;
+            var terminal = _jobs.Where(j => j.Terminal && _terminalJobsSeen.Add(j.Id)).ToList();
+            PullLogs();
+            if (terminal.Count > 0)
+                await RefreshBrowsesForJobsAsync(terminal);
+            StateHasChanged();
+        });
+    }
+
+    private void PullLogs()
+    {
+        var (entries, seq) = Engine.Logs(_logSeq);
+        if (entries.Count > 0)
+        {
+            _logs.AddRange(entries);
+            if (_logs.Count > 1500) _logs.RemoveRange(0, _logs.Count - 1500);
+            _logSeq = seq;
+        }
+    }
+
+    // The browser queue is for MANUAL work only (FXP + downloads), like a real FTP
+    // client. Races have their own page.
+    private List<Job> ManualJobs() => _jobs.Where(j => j.Type != JobType.Race).ToList();
+    private int ActiveJobs() => _jobs.Count(j => j.Type != JobType.Race && j.State is JobState.Queued or JobState.Running);
+    private static string LogCategoryFor(string tab) => tab switch { "ftp" => "ftp", "transfer" => "transfer", _ => "system" };
+
+    private static string StateClass(JobState s) => s switch
+    {
+        JobState.Succeeded => "green",
+        JobState.Failed => "red",
+        JobState.Running => "cyan",
+        _ => "amber",
+    };
+
+    private static string LineClass(LogEntry e)
+    {
+        if (e.Level == "error") return "l-err";
+        if (e.Level == "warn") return "l-warn";
+        if (e.Message.StartsWith("> ")) return "l-sent";
+        if (e.Message.StartsWith("< ")) return "l-recv";
+        if (e.Message.StartsWith("! ")) return "l-err";
+        return "l-info";
+    }
+
+    private string LogLineClass(LogEntry e)
+    {
+        var side = e.Category.Equals("ftp", StringComparison.OrdinalIgnoreCase) ? BrowseSideClass(e.Site) : "";
+        return string.IsNullOrEmpty(side) ? LineClass(e) : $"{LineClass(e)} {side}";
+    }
+
+    private static string BrowseSideClass(string site)
+    {
+        if (site.StartsWith("L/", StringComparison.OrdinalIgnoreCase)) return "browse-left-log";
+        if (site.StartsWith("R/", StringComparison.OrdinalIgnoreCase)) return "browse-right-log";
+        return "";
+    }
+
+    private static string LogSource(LogEntry entry)
+    {
+        if (!string.IsNullOrWhiteSpace(entry.Site))
+            return entry.Site;
+        return entry.Category;
+    }
+
+    // ---- browser tabs ----
+
+    private void AddManualBrowserTab()
+    {
+        var tab = AddBrowserTab($"Browse {_browserTabSeq + 1}", null, true);
+        Toast($"Opened {tab.Title}");
+        PersistBrowserState();
+    }
+
+    private BrowserTab AddBrowserTab(string title, string? jobId, bool activate)
+    {
+        var id = string.IsNullOrWhiteSpace(jobId) ? $"pane-{++_browserTabSeq}" : $"race-{jobId}";
+        if (_browserTabs.Any(t => t.Id == id))
+        {
+            var existing = _browserTabs.First(t => t.Id == id);
+            if (activate) _activeBrowserTabId = existing.Id;
+            return existing;
+        }
+
+        var tab = new BrowserTab(id, title) { JobId = jobId };
+        _browserTabs.Add(tab);
+        if (activate) _activeBrowserTabId = tab.Id;
+        return tab;
+    }
+
+    private void ActivateBrowserTab(string id)
+    {
+        if (_browserTabs.Any(t => t.Id == id))
+        {
+            _activeBrowserTabId = id;
+            HideContext();
+            PersistBrowserState();
+        }
+    }
+
+    private void CloseBrowserTab(string id)
+    {
+        if (_browserTabs.Count <= 1) return;
+        var index = _browserTabs.FindIndex(t => t.Id == id);
+        if (index < 0) return;
+        var closing = _browserTabs[index];
+        if (!string.IsNullOrWhiteSpace(closing.JobId))
+        {
+            _raceJobTabs.Remove(closing.JobId);
+            // Remember it so SyncRaceTabs never re-opens a tab the user closed.
+            _dismissedRaceJobs.Add(closing.JobId!);
+        }
+        _browserTabs.RemoveAt(index);
+        if (_activeBrowserTabId == id)
+            _activeBrowserTabId = _browserTabs[Math.Clamp(index - 1, 0, _browserTabs.Count - 1)].Id;
+        HideContext();
+        PersistBrowserState();
+    }
+
+    // Open a browser tab for a job on demand — only when the user clicks the queue row.
+    // Nothing auto-opens from the API anymore.
+    private void OpenJobTab(Job job)
+    {
+        _dismissedRaceJobs.Remove(job.Id);
+        if (_raceJobTabs.TryGetValue(job.Id, out var existingId) && _browserTabs.Any(t => t.Id == existingId))
+        {
+            _activeBrowserTabId = existingId;
+        }
+        else
+        {
+            var tab = AddBrowserTab(RaceTabTitle(job), job.Id, true);
+            SeedRaceTab(tab, job);
+            _raceJobTabs[job.Id] = tab.Id;
+        }
+        PersistBrowserState();
+        StateHasChanged();
+    }
+
+    private static string RaceTabTitle(Job job)
+    {
+        var name = RemoteLeaf(job.Request.SourcePath);
+        if (string.IsNullOrWhiteSpace(name)) name = RemoteLeaf(job.Request.DestPath);
+        if (string.IsNullOrWhiteSpace(name)) name = job.Request.Label;
+        if (string.IsNullOrWhiteSpace(name)) name = "Race";
+        return name.Length > 28 ? name[..28] + "..." : name;
+    }
+
+    private static void SeedRaceTab(BrowserTab tab, Job job)
+    {
+        tab.Left.Site = job.Request.FromSite;
+        tab.Left.Path = ParentPath(job.Request.SourcePath);
+        tab.Left.Status = job.Request.SourcePath;
+        tab.Right.Site = job.Request.ToSite;
+        tab.Right.Path = ParentPath(job.Request.DestPath);
+        tab.Right.Status = job.Request.DestPath;
+    }
+
+    private string BrowserTabClass(BrowserTab tab)
+    {
+        var job = JobForTab(tab);
+        var state = job is null ? "manual" : job.State.ToString().ToLowerInvariant();
+        var active = tab.Id == Active.Id ? " active" : "";
+        return $"browser-tab-item state-{state}{active}";
+    }
+
+    private string TabTitle(BrowserTab tab)
+    {
+        var job = JobForTab(tab);
+        return job is null ? tab.Title : $"{job.Type}: {job.Request.FromSite} -> {job.Request.ToSite}";
+    }
+
+    private string TabMeta(BrowserTab tab)
+    {
+        var job = JobForTab(tab);
+        if (job is not null) return $"{job.State} · {job.Request.FromSite} → {job.Request.ToSite}";
+        var connected = (string.IsNullOrWhiteSpace(tab.Left.Site) ? 0 : 1) + (string.IsNullOrWhiteSpace(tab.Right.Site) ? 0 : 1);
+        return connected == 0 ? "empty browse" : $"{connected}/2 browses selected";
+    }
+
+    private Job? JobForTab(BrowserTab tab) =>
+        string.IsNullOrWhiteSpace(tab.JobId) ? null : _jobs.FirstOrDefault(j => j.Id == tab.JobId);
+
+    private async Task StartSplitDrag(PointerEventArgs e)
+    {
+        _selfRef ??= DotNetObjectReference.Create(this);
+        await Js.InvokeVoidAsync("weaveFxp.startSplitDrag", _browserRoot, _selfRef, Active.Id, e.ClientX);
+    }
+
+    [JSInvokable]
+    public Task SetSplitPctFromJs(string tabId, int pct)
+    {
+        var tab = _browserTabs.FirstOrDefault(t => t.Id == tabId);
+        if (tab is not null)
+            tab.SplitPct = Math.Clamp(pct, 28, 72);
+        PersistBrowserState();
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private void Toast(string message)
+    {
+        _toast = message;
+        _ = HideToastLater();
+    }
+
+    private async Task HideToastLater()
+    {
+        await Task.Delay(2600);
+        _toast = null;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    // ---- browser state ---------------------------------------------------------------
+
+    private async Task RestoreBrowserStateAsync()
+    {
+        try
+        {
+            var json = await Js.InvokeAsync<string?>("localStorage.getItem", BrowserStateKey);
+            if (string.IsNullOrWhiteSpace(json)) return;
+            var state = System.Text.Json.JsonSerializer.Deserialize<BrowserStateSnapshot>(json, BrowserStateJson);
+            if (state is null || state.Tabs.Count == 0) return;
+
+            _restoringBrowserState = true;
+            _browserTabs.Clear();
+            _raceJobTabs.Clear();
+            _dismissedRaceJobs.Clear();
+            foreach (var jobId in state.DismissedRaceJobs)
+                if (!string.IsNullOrWhiteSpace(jobId)) _dismissedRaceJobs.Add(jobId);
+            foreach (var saved in state.Tabs.Take(12))
+            {
+                var id = string.IsNullOrWhiteSpace(saved.Id) ? $"browse-{_browserTabs.Count + 1}" : saved.Id;
+                var title = string.IsNullOrWhiteSpace(saved.Title) ? "Browse" : saved.Title;
+                var tab = new BrowserTab(id, title)
+                {
+                    JobId = saved.JobId,
+                    SplitPct = Math.Clamp(saved.SplitPct == 0 ? 50 : saved.SplitPct, 28, 72),
+                    BottomVh = Math.Clamp(saved.BottomVh == 0 ? 30 : saved.BottomVh, 18, 52),
+                };
+                RestorePane(tab.Left, saved.Left);
+                RestorePane(tab.Right, saved.Right);
+                _browserTabs.Add(tab);
+                if (!string.IsNullOrWhiteSpace(tab.JobId))
+                    _raceJobTabs[tab.JobId] = tab.Id;
+            }
+
+            if (_browserTabs.Count == 0)
+                _browserTabs.Add(new BrowserTab("main", "Main"));
+
+            _activeBrowserTabId = _browserTabs.Any(t => t.Id == state.ActiveTabId)
+                ? state.ActiveTabId
+                : _browserTabs[0].Id;
+            _browserTabSeq = Math.Max(_browserTabSeq, _browserTabs.Count);
+            await RestoreLoadedBrowsesAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast("Browser state restore failed: " + ex.Message);
+        }
+        finally
+        {
+            _restoringBrowserState = false;
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task RestoreLoadedBrowsesAsync()
+    {
+        foreach (var pane in AllPanes().Where(p => !string.IsNullOrWhiteSpace(p.Site)))
+            await ListPane(pane, true);
+    }
+
+    private static void RestorePane(PaneModel pane, PaneSnapshot? snapshot)
+    {
+        if (snapshot is null) return;
+        pane.Site = snapshot.Site ?? "";
+        pane.Path = string.IsNullOrWhiteSpace(snapshot.Path) ? "/" : snapshot.Path.Trim();
+        pane.SortColumn = string.IsNullOrWhiteSpace(snapshot.SortColumn) ? "name" : snapshot.SortColumn.Trim();
+        pane.SortDesc = snapshot.SortDesc;
+        pane.Status = string.IsNullOrWhiteSpace(pane.Site) ? "Idle" : "Restoring...";
+        pane.Loaded = false;
+        pane.Loading = false;
+        pane.Error = null;
+        pane.Selected.Clear();
+    }
+
+    private void PersistBrowserState()
+    {
+        if (!_browserStorageReady || _restoringBrowserState) return;
+        _ = InvokeAsync(SaveBrowserStateAsync);
+    }
+
+    private async Task SaveBrowserStateAsync()
+    {
+        if (!_browserStorageReady || _restoringBrowserState) return;
+        var state = new BrowserStateSnapshot
+        {
+            ActiveTabId = _activeBrowserTabId,
+            DismissedRaceJobs = _dismissedRaceJobs.ToList(),
+            Tabs = _browserTabs.Select(t => new BrowserTabSnapshot
+            {
+                Id = t.Id,
+                Title = t.Title,
+                JobId = t.JobId,
+                SplitPct = t.SplitPct,
+                BottomVh = t.BottomVh,
+                Left = SnapshotPane(t.Left),
+                Right = SnapshotPane(t.Right),
+            }).ToList(),
+        };
+        var json = System.Text.Json.JsonSerializer.Serialize(state, BrowserStateJson);
+        await Js.InvokeVoidAsync("localStorage.setItem", BrowserStateKey, json);
+    }
+
+    private static PaneSnapshot SnapshotPane(PaneModel pane) => new()
+    {
+        Site = pane.Site,
+        Path = pane.Path,
+        SortColumn = pane.SortColumn,
+        SortDesc = pane.SortDesc,
+    };
+
+    private IEnumerable<PaneModel> AllPanes()
+    {
+        foreach (var tab in _browserTabs)
+        {
+            yield return tab.Left;
+            yield return tab.Right;
+        }
+    }
+
+    private async Task RefreshBrowsesForJobsAsync(IReadOnlyList<Job> jobs)
+    {
+        var refresh = new HashSet<PaneModel>();
+        foreach (var job in jobs)
+        {
+            foreach (var pane in AllPanes())
+            {
+                if (ShouldRefreshPaneForJob(pane, job))
+                    refresh.Add(pane);
+            }
+        }
+
+        foreach (var pane in refresh)
+            await ListPane(pane, true);
+
+        if (refresh.Count > 0)
+            Toast($"Refreshed {refresh.Count} browse(s) after transfer");
+    }
+
+    private static bool ShouldRefreshPaneForJob(PaneModel pane, Job job)
+    {
+        if (string.IsNullOrWhiteSpace(pane.Site) || string.IsNullOrWhiteSpace(job.Request.ToSite)) return false;
+        if (!pane.Site.Equals(job.Request.ToSite, StringComparison.OrdinalIgnoreCase)) return false;
+        return PathTouchesBrowse(pane.Path, job.Request.DestPath);
+    }
+
+    private static bool PathTouchesBrowse(string browsePath, string changedPath)
+    {
+        var browse = NormalizeRemotePath(browsePath);
+        var changed = NormalizeRemotePath(changedPath);
+        if (changed.Length == 0) return false;
+        var parent = ParentPath(changed);
+        return browse.Equals(parent, StringComparison.OrdinalIgnoreCase) ||
+            browse.Equals(changed, StringComparison.OrdinalIgnoreCase) ||
+            browse.StartsWith(changed.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeRemotePath(string path)
+    {
+        path = (path ?? "/").Replace('\\', '/').Trim();
+        if (path.Length == 0) return "/";
+        if (!path.StartsWith('/')) path = "/" + path;
+        while (path.Contains("//", StringComparison.Ordinal)) path = path.Replace("//", "/");
+        return path.Length > 1 ? path.TrimEnd('/') : path;
+    }
+
+    // ---- browse operations ----
+
+    private async Task ConnectPane(PaneModel pane, string site)
+    {
+        if (string.IsNullOrEmpty(site))
+        {
+            DisconnectPane(pane);
+            return;
+        }
+
+        pane.Site = site;
+        var s = _sites.FirstOrDefault(x => x.Name == site);
+        pane.Path = string.IsNullOrEmpty(s?.BasePath) ? "/" : s!.BasePath;
+        await ListPane(pane);
+    }
+
+    private void DisconnectPane(PaneModel pane)
+    {
+        pane.Site = "";
+        pane.Path = "/";
+        pane.Entries.Clear();
+        pane.Selected.Clear();
+        pane.Loaded = false;
+        pane.Loading = false;
+        pane.Error = null;
+        pane.Status = "Disconnected";
+        PersistBrowserState();
+    }
+
+    private async Task JumpSection(PaneModel pane, string section)
+    {
+        if (string.IsNullOrEmpty(pane.Site) || string.IsNullOrEmpty(section)) return;
+        pane.Path = section;
+        await ListPane(pane);
+    }
+
+    private void SetPanePath(PaneModel pane, string path)
+    {
+        pane.Path = string.IsNullOrWhiteSpace(path) ? "/" : path.Trim();
+        PersistBrowserState();
+    }
+
+    private async Task ListPane(PaneModel pane, bool silent = false)
+    {
+        if (pane.Loading || string.IsNullOrEmpty(pane.Site)) return;
+        pane.Loading = true;
+        pane.Error = null;
+        pane.Status = $"Connecting to {pane.Site}…";
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var entries = await Engine.ListRemoteAsync(pane.Site, pane.Path, BrowseLogName(pane));
+            pane.Entries = entries;
+            ApplySort(pane);
+            pane.Selected.Clear();
+            pane.Loaded = true;
+            UpdatePaneStatus(pane);
+        }
+        catch (Exception ex)
+        {
+            pane.Error = ex.Message;
+            pane.Status = "Error";
+            if (!silent) Toast(ex.Message);
+        }
+        pane.Loading = false;
+        PersistBrowserState();
+    }
+
+    private void UpdatePaneStatus(PaneModel pane)
+    {
+        var dirs = pane.Entries.Count(e => e.Type == "dir");
+        var files = pane.Entries.Count - dirs;
+        var bytes = pane.Entries.Where(e => e.Type != "dir").Sum(e => e.Size);
+        var sel = pane.Selected.Count > 0 ? $" — {pane.Selected.Count} selected" : "";
+        pane.Status = $"{dirs} dirs, {files} files, {HumanSize(bytes)}{sel}";
+    }
+
+    private async Task OpenEntry(PaneModel pane, int index)
+    {
+        if (index < 0 || index >= pane.Entries.Count) return;
+        var entry = pane.Entries[index];
+        // Follow directories and symlinks (scene sections are full of symlinks that
+        // point at the real release dirs). CWD on the server resolves the link.
+        if (entry.Type is "dir" or "link")
+        {
+            pane.Path = string.IsNullOrEmpty(entry.Path) ? PJoin(pane.Path, entry.Name) : entry.Path;
+            await ListPane(pane);
+        }
+    }
+
+    private async Task GoUp(PaneModel pane)
+    {
+        if (string.IsNullOrEmpty(pane.Site)) return;
+        pane.Path = ParentPath(pane.Path);
+        await ListPane(pane);
+    }
+
+    private void ToggleSelect(PaneModel pane, int index, MouseEventArgs e)
+    {
+        if (e.ShiftKey && pane.Anchor >= 0 && pane.Anchor < pane.Entries.Count)
+        {
+            // Range select from the anchor to the clicked row — folders and files alike.
+            var from = Math.Min(pane.Anchor, index);
+            var to = Math.Max(pane.Anchor, index);
+            if (!(e.CtrlKey || e.MetaKey)) pane.Selected.Clear();
+            for (var i = from; i <= to; i++) pane.Selected.Add(i);
+        }
+        else if (e.CtrlKey || e.MetaKey)
+        {
+            if (!pane.Selected.Add(index)) pane.Selected.Remove(index);
+            pane.Anchor = index;
+        }
+        else
+        {
+            pane.Selected.Clear();
+            pane.Selected.Add(index);
+            pane.Anchor = index;
+        }
+        UpdatePaneStatus(pane);
+    }
+
+    private void SortPane(PaneModel pane, string column)
+    {
+        if (pane.SortColumn.Equals(column, StringComparison.OrdinalIgnoreCase))
+            pane.SortDesc = !pane.SortDesc;
+        else
+        {
+            pane.SortColumn = column;
+            pane.SortDesc = false;
+        }
+        ApplySort(pane);
+        pane.Selected.Clear();
+        UpdatePaneStatus(pane);
+        PersistBrowserState();
+    }
+
+    private static void ApplySort(PaneModel pane)
+    {
+        var dirsFirst = pane.Entries.OrderBy(e => e.Type == "dir" ? 0 : 1);
+        IOrderedEnumerable<RemoteEntry> sorted = pane.SortColumn switch
+        {
+            "size" => pane.SortDesc
+                ? dirsFirst.ThenByDescending(e => e.Size).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                : dirsFirst.ThenBy(e => e.Size).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase),
+            "modified" => pane.SortDesc
+                ? dirsFirst.ThenByDescending(e => e.Modified).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                : dirsFirst.ThenBy(e => e.Modified).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase),
+            _ => pane.SortDesc
+                ? dirsFirst.ThenByDescending(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                : dirsFirst.ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase),
+        };
+        pane.Entries = sorted.ToList();
+    }
+
+    private void QueueFxp(PaneModel source, PaneModel dest)
+    {
+        if (string.IsNullOrEmpty(source.Site)) { Toast("Source browse has no site"); return; }
+        if (string.IsNullOrEmpty(dest.Site)) { Toast("Destination browse has no site"); return; }
+        if (source.Site == dest.Site) { Toast("Source and destination are the same site"); return; }
+        var picks = source.Selected.Select(i => source.Entries[i]).ToList();
+        if (picks.Count == 0) { Toast("Select files or directories first"); return; }
+
+        var queued = 0;
+        foreach (var entry in picks)
+        {
+            var src = string.IsNullOrEmpty(entry.Path) ? PJoin(source.Path, entry.Name) : entry.Path;
+            var dst = PJoin(dest.Path, entry.Name);
+            try
+            {
+                Engine.StartFxp(new TransferRequest
+                {
+                    FromSite = source.Site,
+                    ToSite = dest.Site,
+                    SourcePath = src,
+                    DestPath = dst,
+                });
+                queued++;
+            }
+            catch (Exception ex) { Toast($"{entry.Name}: {ex.Message}"); }
+        }
+        if (queued > 0)
+        {
+            Toast($"Queued {queued} transfer(s) {source.Site} → {dest.Site}");
+            _tab = "queue";
+        }
+    }
+
+    private void ShowContext(PaneModel pane, int index, MouseEventArgs e)
+    {
+        _contextKind = ContextKind.Pane;
+        _contextPane = pane;
+        _contextIndex = index;
+        _contextJobId = "";
+        _contextXpx = $"{Math.Max(6, e.ClientX)}px";
+        _contextYpx = $"{Math.Max(6, e.ClientY)}px";
+        _contextOpen = true;
+        if (index >= 0 && !pane.Selected.Contains(index))
+        {
+            pane.Selected.Clear();
+            pane.Selected.Add(index);
+            UpdatePaneStatus(pane);
+        }
+    }
+
+    private void HideContext()
+    {
+        _contextOpen = false;
+        _contextKind = ContextKind.None;
+    }
+
+    private void ShowJobContext(Job job, MouseEventArgs e)
+    {
+        _contextKind = ContextKind.Queue;
+        _contextPane = null;
+        _contextIndex = -1;
+        _contextJobId = job?.Id ?? "";
+        _contextXpx = $"{Math.Max(6, e.ClientX)}px";
+        _contextYpx = $"{Math.Max(6, e.ClientY)}px";
+        _contextOpen = true;
+    }
+
+    private RemoteEntry? ContextEntry() =>
+        _contextPane is null || _contextIndex < 0 || _contextIndex >= _contextPane.Entries.Count
+            ? null : _contextPane.Entries[_contextIndex];
+
+    private string ContextTitle()
+    {
+        if (_contextKind == ContextKind.Queue)
+        {
+            var queueJob = ContextJob;
+            return queueJob is null ? "Queue job" : $"Queue job: {queueJob.Id}";
+        }
+
+        var entry = ContextEntry();
+        return entry is null ? _contextPane?.Path ?? "Browse" : entry.Name;
+    }
+
+    private Job? ContextJob => string.IsNullOrWhiteSpace(_contextJobId) ? null : _jobs.FirstOrDefault(j => j.Id.Equals(_contextJobId, StringComparison.OrdinalIgnoreCase));
+
+    private async Task OpenContextEntry()
+    {
+        if (_contextPane is not null && _contextIndex >= 0)
+            await OpenEntry(_contextPane, _contextIndex);
+        HideContext();
+    }
+
+    private bool CanTransfer(PaneModel? pane)
+    {
+        if (pane is null || string.IsNullOrEmpty(pane.Site)) return false;
+        var other = OtherPane(pane);
+        return !string.IsNullOrEmpty(other.Site) && !other.Site.Equals(pane.Site, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool CanRestartContextJob()
+    {
+        var job = ContextJob;
+        return job is not null;
+    }
+
+    private bool CanCancelContextJob()
+    {
+        var job = ContextJob;
+        return job is not null && job.State is JobState.Queued or JobState.Running;
+    }
+
+    private bool CanRetryContextJob()
+    {
+        var job = ContextJob;
+        return job is not null && job.Terminal;
+    }
+
+    private PaneModel OtherPane(PaneModel pane)
+    {
+        var tab = _browserTabs.FirstOrDefault(t => ReferenceEquals(t.Left, pane) || ReferenceEquals(t.Right, pane)) ?? Active;
+        return ReferenceEquals(pane, tab.Left) ? tab.Right : tab.Left;
+    }
+
+    private string OtherSideName(PaneModel? pane)
+    {
+        if (pane is null) return "other browse";
+        var tab = _browserTabs.FirstOrDefault(t => ReferenceEquals(t.Left, pane) || ReferenceEquals(t.Right, pane)) ?? Active;
+        return ReferenceEquals(pane, tab.Left) ? "right" : "left";
+    }
+
+    private void TransferFromContext(bool queue)
+    {
+        if (_contextPane is null) return;
+        QueueFxp(_contextPane, OtherPane(_contextPane));
+        Toast(queue ? "Transfer queued" : "Transfer started");
+        HideContext();
+    }
+
+    private void OpenCommandShell(string command = "")
+    {
+        if (_contextPane is null || string.IsNullOrEmpty(_contextPane.Site)) { Toast("Browse has no connected site"); return; }
+        _shellSite = _contextPane.Site;
+        _shellLogAlias = BrowseLogName(_contextPane);
+        _shellCommand = command;
+        _shellResult = "";
+        _shellOpen = true;
+        HideContext();
+    }
+
+    private void OpenCommandShellForQueue()
+    {
+        var job = ContextJob;
+        if (job is null || string.IsNullOrWhiteSpace(job.Request.FromSite))
+        {
+            Toast("Queue job has no source site");
+            return;
+        }
+
+        _shellSite = job.Request.FromSite;
+        _shellLogAlias = $"Q/{job.Request.FromSite}";
+        _shellCommand = "";
+        _shellResult = "";
+        _shellOpen = true;
+        HideContext();
+    }
+
+    private void CancelContextJob()
+    {
+        var job = ContextJob;
+        if (job is null) { HideContext(); return; }
+        if (!Engine.CancelJob(job.Id, "Stopped by user"))
+            Toast($"Cannot stop {job.Id}");
+        HideContext();
+    }
+
+    private void PauseContextJob()
+    {
+        var job = ContextJob;
+        if (job is null) { HideContext(); return; }
+        if (!Engine.PauseJob(job.Id))
+            Toast($"Cannot pause {job.Id}");
+        HideContext();
+    }
+
+    private void ResumeContextJob()
+    {
+        var job = ContextJob;
+        if (job is null) { HideContext(); return; }
+        if (!Engine.ResumeJob(job.Id))
+            Toast($"Cannot resume {job.Id}");
+        HideContext();
+    }
+
+    private void RetryContextJob()
+    {
+        var job = ContextJob;
+        if (job is null) { HideContext(); return; }
+        if (!Engine.RetryJob(job.Id))
+            Toast($"Cannot retry {job.Id}");
+        HideContext();
+    }
+
+    private void RemoveContextJob()
+    {
+        var job = ContextJob;
+        if (job is null) { HideContext(); return; }
+        if (!Engine.RemoveJob(job.Id))
+            Toast($"Cannot remove {job.Id}");
+        HideContext();
+    }
+
+    private void RestartContextJob()
+    {
+        var job = ContextJob;
+        if (job is null) { HideContext(); return; }
+        if (!Engine.RestartJob(job.Id))
+            Toast($"Cannot restart {job.Id}");
+        HideContext();
+    }
+
+    private void CloseShell() => _shellOpen = false;
+
+    private async Task ExecuteShell()
+    {
+        try
+        {
+            var result = await Engine.SendRawCommandAsync(_shellSite, _shellCommand, _shellLogAlias);
+            _shellResult = $"{result.Code} {(result.Ok ? "OK" : "FAILED")}\n{result.Message}";
+            _tab = "system";
+        }
+        catch (Exception ex)
+        {
+            _shellResult = "Error: " + ex.Message;
+        }
+    }
+
+    private string ChmodCommand()
+    {
+        var entry = ContextEntry();
+        var path = entry is null ? _contextPane?.Path ?? "/" : (string.IsNullOrEmpty(entry.Path) ? PJoin(_contextPane?.Path ?? "/", entry.Name) : entry.Path);
+        return "SITE CHMOD 755 " + path;
+    }
+
+    private string NukeCommand()
+    {
+        var entry = ContextEntry();
+        return "SITE NUKE " + (entry?.Name ?? "");
+    }
+
+    private void DownloadContext()
+    {
+        if (_contextPane is not null)
+            Download(_contextPane);
+        HideContext();
+    }
+
+    private async Task CheckContextSfv()
+    {
+        if (_contextPane is not null)
+            await Sfv(_contextPane);
+        HideContext();
+    }
+
+    private async Task RefreshContextPane()
+    {
+        if (_contextPane is not null)
+            await ListPane(_contextPane);
+        HideContext();
+    }
+
+    private void Download(PaneModel pane)
+    {
+        if (string.IsNullOrEmpty(pane.Site)) { Toast("Pick a site first"); return; }
+        var picks = pane.Selected.Select(i => pane.Entries[i]).ToList();
+        if (picks.Count == 0) { Toast("Select files or directories first"); return; }
+        var queued = 0;
+        foreach (var entry in picks)
+        {
+            var src = string.IsNullOrEmpty(entry.Path) ? PJoin(pane.Path, entry.Name) : entry.Path;
+            try { Engine.StartDownload(new DownloadRequest { Site = pane.Site, SourcePath = src }); queued++; }
+            catch (Exception ex) { Toast($"{entry.Name}: {ex.Message}"); }
+        }
+        if (queued > 0) { Toast($"Queued {queued} download(s) from {pane.Site}"); _tab = "queue"; }
+    }
+
+    private async Task Sfv(PaneModel pane)
+    {
+        if (string.IsNullOrEmpty(pane.Site)) { Toast("Pick a site first"); return; }
+        pane.Status = "Checking release…";
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var check = await Engine.CheckReleaseAsync(pane.Site, pane.Path);
+            Toast($"{(string.IsNullOrEmpty(check.Name) ? check.Path : check.Name)}: {check.State.ToString().ToLowerInvariant()}");
+            _tab = "system";
+        }
+        catch (Exception ex) { Toast(ex.Message); }
+        UpdatePaneStatus(pane);
+    }
+
+    // ---- helpers ----
+
+    private static string HumanSize(long bytes)
+    {
+        if (bytes <= 0) return "0 B";
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double v = bytes;
+        var u = 0;
+        while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
+        return u == 0 ? $"{bytes} B" : $"{v.ToString(v >= 100 ? "0" : "0.0")} {units[u]}";
+    }
+
+    private static string Speed(double bps)
+    {
+        if (bps <= 0) return "";
+        string[] units = { "B/s", "KB/s", "MB/s", "GB/s" };
+        var v = bps;
+        var u = 0;
+        while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
+        return $"{v.ToString(v >= 100 ? "0" : "0.0")} {units[u]}";
+    }
+
+    private static string ProgressText(Job job)
+    {
+        // Downloads move real bytes through us → show size + speed. FXP is
+        // server-to-server (no bytes flow through the app) → show a file count.
+        if (job.Type == JobType.Download)
+        {
+            var pct = job.Percent >= 0 ? $"{job.Percent}% · " : "";
+            var size = job.BytesTotal > 0 ? $"{HumanSize(job.BytesDone)}/{HumanSize(job.BytesTotal)}" : HumanSize(job.CumulativeBytes);
+            var spd = Speed(job.SpeedBps);
+            var files = job.FilesTotal > 1 ? $" · {job.FilesDone}/{job.FilesTotal} files" : "";
+            var file = string.IsNullOrEmpty(job.CurrentFile) ? "" : $" · {job.CurrentFile}";
+            return $"{pct}{size}{(spd.Length > 0 ? " · " + spd : "")}{files}{file}";
+        }
+        // FXP / race: file-count bar plus real moved bytes and average throughput
+        // (computed from completed-file sizes over elapsed time).
+        var count = job.FilesTotal > 0 ? $"{job.FilesDone}/{job.FilesTotal} files" : $"{job.FilesDone} files";
+        var bytes = job.CumulativeBytes > 0 ? $" · {HumanSize(job.CumulativeBytes)}" : "";
+        var speed = job.SpeedBps > 0 ? $" · {Speed(job.SpeedBps)}" : "";
+        var cur = string.IsNullOrEmpty(job.CurrentFile) ? "" : $" · {job.CurrentFile}";
+        return $"{count}{bytes}{speed}{cur}";
+    }
+
+    private static string PJoin(string basePath, string name)
+    {
+        basePath = (basePath ?? "/").Trim();
+        if (basePath.Length == 0 || basePath == "/") return "/" + name.TrimStart('/');
+        return basePath.TrimEnd('/') + "/" + name.TrimStart('/');
+    }
+
+    private static string ParentPath(string path)
+    {
+        path = (path ?? "/").TrimEnd('/');
+        if (path.Length == 0) return "/";
+        var idx = path.LastIndexOf('/');
+        return idx <= 0 ? "/" : path[..idx];
+    }
+
+    private static string RemoteLeaf(string path)
+    {
+        path = (path ?? "").Trim().TrimEnd('/', '\\');
+        if (path.Length == 0) return "";
+        var slash = path.LastIndexOf('/');
+        var backslash = path.LastIndexOf('\\');
+        var idx = Math.Max(slash, backslash);
+        return idx >= 0 ? path[(idx + 1)..] : path;
+    }
+
+    private static string BrowseLogName(PaneModel pane)
+    {
+        if (string.IsNullOrWhiteSpace(pane.Site)) return "";
+        return pane.Side.Equals("right", StringComparison.OrdinalIgnoreCase)
+            ? $"R/{pane.Site}"
+            : $"L/{pane.Site}";
+    }
+
+    private enum ContextKind
+    {
+        None,
+        Pane,
+        Queue,
+    }
+
+    private sealed class BrowserTab
+    {
+        public BrowserTab(string id, string title)
+        {
+            Id = id;
+            Title = title;
+            Left = new PaneModel { Side = "left" };
+            Right = new PaneModel { Side = "right" };
+        }
+
+        public string Id { get; }
+        public string Title { get; set; }
+        public string? JobId { get; set; }
+        public PaneModel Left { get; }
+        public PaneModel Right { get; }
+        public int SplitPct { get; set; } = 50;
+        public int BottomVh { get; set; } = 30;
+    }
+
+    private sealed class BrowserStateSnapshot
+    {
+        public string ActiveTabId { get; set; } = "main";
+        public List<string> DismissedRaceJobs { get; set; } = new();
+        public List<BrowserTabSnapshot> Tabs { get; set; } = new();
+    }
+
+    private sealed class BrowserTabSnapshot
+    {
+        public string Id { get; set; } = "";
+        public string Title { get; set; } = "";
+        public string? JobId { get; set; }
+        public PaneSnapshot? Left { get; set; }
+        public PaneSnapshot? Right { get; set; }
+        public int SplitPct { get; set; } = 50;
+        public int BottomVh { get; set; } = 30;
+    }
+
+    private sealed class PaneSnapshot
+    {
+        public string Site { get; set; } = "";
+        public string Path { get; set; } = "/";
+        public string SortColumn { get; set; } = "name";
+        public bool SortDesc { get; set; }
+    }
+}

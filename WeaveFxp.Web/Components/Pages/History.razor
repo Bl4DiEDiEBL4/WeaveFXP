@@ -1,0 +1,172 @@
+@page "/history"
+@implements IDisposable
+@inject WeaveEngine Engine
+
+<h1 class="visually-hidden">History</h1>
+
+<div class="page history-page">
+    <header class="page-head page-head-lg">
+        <div>
+            <div class="eyebrow">Stored Activity</div>
+            <h2><span class="title-icon">◷</span> History</h2>
+            <p class="page-sub">@_jobs.Count job(s), @_releases.Count release check(s) stored.</p>
+        </div>
+        <div class="page-actions">
+            <button class="secondary" @onclick="Refresh"><span class="btn-icon">↻</span> Refresh</button>
+        </div>
+    </header>
+
+    <section class="content-panel">
+        <nav class="editor-tabs">
+            <button class='@TabClass("jobs")' @onclick='() => _tab = "jobs"'><span class="tab-icon">⇄</span> Transfers</button>
+            <button class='@TabClass("releases")' @onclick='() => _tab = "releases"'><span class="tab-icon">✓</span> Releases</button>
+        </nav>
+
+        <div class="toolbar">
+            <input placeholder="Search site, path, release..." @bind="_query" @bind:event="oninput" @bind:after="FilterChanged" />
+            @if (_tab == "jobs")
+            {
+                <select @bind="_state" @bind:after="FilterChanged">
+                    <option value="">All states</option>
+                    @foreach (var s in Enum.GetValues<JobState>())
+                    {
+                        <option value="@s">@s</option>
+                    }
+                </select>
+            }
+            else
+            {
+                <select @bind="_releaseState" @bind:after="FilterChanged">
+                    <option value="">All states</option>
+                    @foreach (var s in Enum.GetValues<ReleaseState>())
+                    {
+                        <option value="@s">@s</option>
+                    }
+                </select>
+            }
+            <span class="spacer"></span>
+            <span class="hint">@PageLabel</span>
+            <select class="page-size" @bind="_pageSize" @bind:after="FilterChanged">
+                <option value="20">20 lines</option>
+                <option value="50">50 lines</option>
+                <option value="100">100 lines</option>
+                <option value="200">200 lines</option>
+            </select>
+        </div>
+
+        @if (_tab == "jobs")
+        {
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Created</th>
+                            <th>State</th>
+                            <th>Type</th>
+                            <th>Route</th>
+                            <th>Source</th>
+                            <th>Destination</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var job in PagedJobs)
+                        {
+                            <tr>
+                                <td class="mono">@Local(job.CreatedAt)</td>
+                                <td><span class="pill @StateClass(job.State)">@job.State</span></td>
+                                <td>@job.Type</td>
+                                <td class="strong">@job.Request.FromSite → @job.Request.ToSite</td>
+                                <td class="mono">@job.Request.SourcePath</td>
+                                <td class="mono">@job.Request.DestPath</td>
+                                <td class="dim">@JobDetail(job)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Checked</th>
+                            <th>State</th>
+                            <th>Site</th>
+                            <th>Release</th>
+                            <th>Path</th>
+                            <th>Files</th>
+                            <th>Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var release in PagedReleases)
+                        {
+                            <tr>
+                                <td class="mono">@Local(release.CheckedAt)</td>
+                                <td><span class="pill @ReleaseClass(release.State)">@release.State</span></td>
+                                <td class="strong">@release.Site</td>
+                                <td>@release.Name</td>
+                                <td class="mono">@release.Path</td>
+                                <td>@release.Files.Count</td>
+                                <td class="dim">@ReleaseDetail(release)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+</div>
+
+@code {
+    private List<Job> _jobs = new();
+    private List<ReleaseCheck> _releases = new();
+    private string _tab = "jobs";
+    private string _query = "";
+    private string _state = "";
+    private string _releaseState = "";
+    private int _pageSize = 50;
+
+    private IEnumerable<Job> FilteredJobs => _jobs
+        .Where(j => string.IsNullOrEmpty(_state) || j.State.ToString() == _state)
+        .Where(j => Matches($"{j.Request.FromSite} {j.Request.ToSite} {j.Request.SourcePath} {j.Request.DestPath} {j.Error}"));
+
+    private IEnumerable<ReleaseCheck> FilteredReleases => _releases
+        .Where(r => string.IsNullOrEmpty(_releaseState) || r.State.ToString() == _releaseState)
+        .Where(r => Matches($"{r.Site} {r.Name} {r.Path} {r.Description}"));
+
+    private IEnumerable<Job> PagedJobs => FilteredJobs.Take(_pageSize);
+    private IEnumerable<ReleaseCheck> PagedReleases => FilteredReleases.Take(_pageSize);
+    private string PageLabel => _tab == "jobs" ? $"{FilteredJobs.Count()} transfer row(s)" : $"{FilteredReleases.Count()} release row(s)";
+
+    protected override void OnInitialized()
+    {
+        Engine.Changed += OnChanged;
+        Refresh();
+    }
+
+    private void OnChanged() => InvokeAsync(() => { Refresh(); StateHasChanged(); });
+
+    private void Refresh()
+    {
+        _jobs = Engine.Jobs();
+        _releases = Engine.Releases();
+    }
+
+    private void FilterChanged() => Refresh();
+    private string TabClass(string tab) => $"editor-tab {(_tab == tab ? "active" : "")}";
+    private bool Matches(string value) => string.IsNullOrWhiteSpace(_query) || value.Contains(_query, StringComparison.OrdinalIgnoreCase);
+    private static string Local(DateTime dt) => dt == default ? "" : dt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+    private static string StateClass(JobState s) => s switch { JobState.Succeeded => "on", JobState.Failed => "off", JobState.Running => "busy", _ => "" };
+    private static string ReleaseClass(ReleaseState s) => s switch { ReleaseState.Complete => "on", ReleaseState.Incomplete => "off", _ => "" };
+    private static string JobDetail(Job job) => !string.IsNullOrWhiteSpace(job.Error) ? job.Error : job.Events.LastOrDefault()?.Message ?? "";
+    private static string ReleaseDetail(ReleaseCheck release) =>
+        release.Missing.Count > 0 ? $"{release.Missing.Count} missing" :
+        release.Markers.Count > 0 ? string.Join(", ", release.Markers.Take(3)) :
+        release.Description;
+
+    public void Dispose() => Engine.Changed -= OnChanged;
+}

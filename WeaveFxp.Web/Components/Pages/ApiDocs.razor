@@ -1,0 +1,127 @@
+@page "/api-docs"
+@inject WeaveEngine Engine
+
+<h1 class="visually-hidden">API</h1>
+
+<div class="page docs-page">
+    <header class="page-head page-head-lg">
+        <div>
+            <div class="eyebrow">Programmable Client</div>
+            <h2><span class="title-icon">⌘</span> API</h2>
+            <p class="page-sub">Every important client action is callable under <code>/api</code>. Compatibility endpoints are available for external race tools.</p>
+        </div>
+    </header>
+
+    <section class="doc-page">
+        <div class="doc-hero">
+            <div>
+                <span class="doc-kicker">Base URL</span>
+                <h2>@BaseUrl</h2>
+                <p>Use JSON bodies for POST/PUT endpoints. The API listener is plain HTTP for LAN tools; put HTTPS in front with a reverse proxy if you expose it outside your network.</p>
+            </div>
+        </div>
+
+        @foreach (var group in Groups)
+        {
+            <section class="api-section">
+                <div class="api-section-head">
+                    <h3>@group.Title</h3>
+                    <span>@group.Examples.Length endpoint@(group.Examples.Length == 1 ? "" : "s")</span>
+                </div>
+                <div class="api-grid">
+                    @foreach (var ex in group.Examples)
+                    {
+                        <article class="api-card">
+                            <div class="api-card-head">
+                                <h4>@ex.Title</h4>
+                                <span class="method-pill">@ex.Method</span>
+                            </div>
+                            <p>@ex.Text</p>
+                            <pre><code>@ex.Code</code></pre>
+                        </article>
+                    }
+                </div>
+            </section>
+        }
+    </section>
+</div>
+
+@code {
+    private AppSettings Settings => Engine.Settings(true);
+    private string BaseUrl => Settings.EnableHttpsJsonApi
+        ? $"http://{ApiHostForDocs(Settings)}:{Settings.HttpsJsonApiPort}"
+        : $"http://{WebHostForDocs(Settings.WebBindAddress)}:{Settings.WebPort}";
+    private string CurlPrefix => "curl";
+    private string AuthHeader => Settings.ApiPasswordSet ? " -H \"X-WeaveFXP-API-Key: <password>\"" : "";
+    private string JsonHeaders => $"{AuthHeader} -H \"Content-Type: application/json\"";
+
+    private ApiGroup[] Groups => new[]
+    {
+        new ApiGroup("Core API", new[]
+        {
+            new ApiExample("Health", "Version, data folder, state file and counts.", "GET",
+                $"{CurlPrefix}{AuthHeader} {BaseUrl}/api/health"),
+            new ApiExample("Sites", "List configured sites.", "GET",
+                $"{CurlPrefix}{AuthHeader} {BaseUrl}/api/sites"),
+            new ApiExample("Logs", "Read API/system/FTP/transfer logs.", "GET",
+                $"{CurlPrefix}{AuthHeader} \"{BaseUrl}/api/logs?category=api&limit=100\""),
+            new ApiExample("History", "Read transfer jobs and release checks.", "GET",
+                $"{CurlPrefix}{AuthHeader} {BaseUrl}/api/jobs\n{CurlPrefix}{AuthHeader} {BaseUrl}/api/releases"),
+        }),
+        new ApiGroup("Transfers", new[]
+        {
+            new ApiExample("Start FXP", "Start a site-to-site transfer.", "POST",
+                $"{CurlPrefix} -X POST {BaseUrl}/api/fxp{JsonHeaders} -d \"{{\\\"from_site\\\":\\\"SITE_A\\\",\\\"to_site\\\":\\\"SITE_B\\\",\\\"source_path\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"dest_path\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
+            new ApiExample("Spread/Race", "Send one source to multiple targets.", "POST",
+                $"{CurlPrefix} -X POST {BaseUrl}/api/spread{JsonHeaders} -d \"{{\\\"from_site\\\":\\\"SITE_A\\\",\\\"to_sites\\\":[\\\"SITE_B\\\",\\\"SITE_C\\\"],\\\"source_path\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"dest_path\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"race\\\":true}}\""),
+            new ApiExample("Local Download", "Download from one site to the configured local download folder.", "POST",
+                $"{CurlPrefix} -X POST {BaseUrl}/api/download{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"source_path\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
+            new ApiExample("Raw FTP Command", "Send SITE commands or other single-line FTP commands.", "POST",
+                $"{CurlPrefix} -X POST {BaseUrl}/api/raw-command{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"command\\\":\\\"SITE WHO\\\"}}\""),
+        }),
+        new ApiGroup("Queue", new[]
+        {
+            new ApiExample("Queue job actions", "Cancel, retry, restart and remove jobs from the queue.", "POST/DELETE",
+                $"{CurlPrefix} -X POST {BaseUrl}/api/jobs/<job-id>/cancel{AuthHeader}\n{CurlPrefix} -X POST {BaseUrl}/api/jobs/<job-id>/retry{AuthHeader}\n{CurlPrefix} -X POST {BaseUrl}/api/jobs/<job-id>/restart{AuthHeader}\n{CurlPrefix} -X DELETE {BaseUrl}/api/jobs/<job-id>{AuthHeader}"),
+            new ApiExample("Maintenance", "Clear stored runtime data without deleting sites or settings.", "DELETE",
+                $"{CurlPrefix} -X DELETE {BaseUrl}/api/logs{AuthHeader}\n{CurlPrefix} -X DELETE {BaseUrl}/api/jobs{AuthHeader}\n{CurlPrefix} -X DELETE {BaseUrl}/api/releases{AuthHeader}\n{CurlPrefix} -X DELETE {BaseUrl}/api/runtime-data{AuthHeader}"),
+        }),
+        new ApiGroup("Compatibility", new[]
+        {
+            new ApiExample("Sites", "List sites and sections in the compatibility shape.", "GET",
+                $"{CurlPrefix} -u :<password> {BaseUrl}/sites\n{CurlPrefix} -u :<password> {BaseUrl}/sections"),
+            new ApiExample("Browse", "Folder listing shape for external FXP browsers.", "GET",
+                $"{CurlPrefix} -u :<password> \"{BaseUrl}/path?site=SITE_A&path=/SECTION&timeout=60\""),
+            new ApiExample("File View", "Read a remote text/NFO/SFV/image file for preview.", "GET",
+                $"{CurlPrefix} -u :<password> \"{BaseUrl}/file?site=SITE_A&path=/SECTION/Release.Name-GRP/file.nfo&timeout=30\""),
+            new ApiExample("Spreadjob", "Compatibility route for race sends.", "POST",
+                $"{CurlPrefix} -u :<password> -H \"Content-Type: application/json\" -X POST {BaseUrl}/spreadjobs -d \"{{\\\"section\\\":\\\"SECTION\\\",\\\"name\\\":\\\"Release.Name-GRP\\\",\\\"sites\\\":[\\\"SITE_A\\\",\\\"SITE_B\\\"],\\\"sites_dlonly\\\":[\\\"SITE_A\\\"]}}\""),
+        }),
+    };
+
+    private static string ApiHostForDocs(AppSettings settings)
+    {
+        if (settings.ApiListeningMode == ApiListenMode.Local) return "127.0.0.1";
+        if (settings.ApiListeningMode == ApiListenMode.Interface)
+            return InterfaceAddress(settings.BindInterface) ?? WebHostForDocs(settings.WebBindAddress);
+        return InterfaceAddress(settings.BindInterface) ?? "<this-pc-ip>";
+    }
+
+    private static string WebHostForDocs(string bind)
+    {
+        bind = string.IsNullOrWhiteSpace(bind) ? "127.0.0.1" : bind.Trim();
+        return bind is "0.0.0.0" or "*" ? "<this-pc-ip>" : bind;
+    }
+
+    private static string? InterfaceAddress(string value)
+    {
+        value = (value ?? "").Trim();
+        if (value.Length == 0) return null;
+        var comma = value.LastIndexOf(',');
+        var address = comma >= 0 ? value[(comma + 1)..].Trim() : value;
+        return address.Length == 0 ? null : address;
+    }
+
+    private sealed record ApiGroup(string Title, ApiExample[] Examples);
+    private sealed record ApiExample(string Title, string Text, string Method, string Code);
+}

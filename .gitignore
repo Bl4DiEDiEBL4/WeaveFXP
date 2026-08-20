@@ -1,0 +1,17 @@
+bin/
+obj/
+data/
+publish/
+*.user
+Release/
+OUD/
+.tmp-*.png
+*.exe
+*.dll
+*.pdb
+.vs/
+*.log
+gitw.bat
+
+.git_work/
+

@@ -1,0 +1,571 @@
+@page "/sites"
+@inject WeaveEngine Engine
+
+<h1 class="visually-hidden">Site Manager</h1>
+
+<div class="page manager-page">
+    <header class="page-head page-head-lg">
+        <div>
+            <div class="eyebrow">Configuration</div>
+            <h2><span class="title-icon">▤</span> Sites</h2>
+            <p class="page-sub">@LoadedLabel()</p>
+        </div>
+        <div class="page-actions">
+            <button class="secondary" @onclick="Reload">
+                <span class="btn-icon">↻</span>
+                Load sites
+            </button>
+            <button class="secondary" disabled="@(_editing is null)" @onclick="Probe">
+                <span class="btn-icon">⚗</span>
+                Probe
+            </button>
+            <button class="secondary" disabled="@(_editing is null)" @onclick="Duplicate">
+                <span class="btn-icon">▣</span>
+                Duplicate
+            </button>
+            <button class="secondary danger" disabled="@(_editing is null)" @onclick="Delete">
+                <span class="btn-icon">⌫</span>
+                Delete
+            </button>
+            <button @onclick="Save">
+                <span class="btn-icon">▣</span>
+                Save site
+            </button>
+        </div>
+    </header>
+
+    <div class="site-manager">
+        <aside class="sm-list">
+            <button class="sm-new" @onclick="NewSite">
+                <span class="btn-icon">＋</span>
+                New site
+            </button>
+            @if (_sites.Count == 0)
+            {
+                <div class="muted sm-none">No sites yet</div>
+            }
+            else
+            {
+                @foreach (var s in _sites)
+                {
+                    <button class="sm-site @(_editing == s.Name ? "current" : "")" @onclick="() => EditSite(s.Name)">
+                        <span class="sm-site-name">@s.Name</span>
+                        <span class="sm-site-host">@s.Host:@s.Port</span>
+                        <span class="sm-site-meta">@s.Sections.Count sections · @s.Affils.Count groups · @s.FxpMode</span>
+                    </button>
+                }
+            }
+        </aside>
+
+        <section class="sm-form">
+            <div class="manager-toolbar">
+                <label class="compact-field">Existing site
+                    <select value="@(_editing ?? "")" @onchange="SelectExisting">
+                        <option value="">New site</option>
+                        @foreach (var s in _sites)
+                        {
+                            <option value="@s.Name">@s.Name</option>
+                        }
+                    </select>
+                </label>
+                <div class="manager-note">@(_editing is null ? "Create a fresh FXP site profile." : $"Editing {_editing}")</div>
+            </div>
+
+            <nav class="editor-tabs">
+                <button class='@TabClass("basic")' @onclick='() => _tab = "basic"'><span class="tab-icon">▧</span> Basic</button>
+                <button class='@TabClass("transfer")' @onclick='() => _tab = "transfer"'><span class="tab-icon">⇄</span> Transfer</button>
+                <button class='@TabClass("affils")' @onclick='() => _tab = "affils"'><span class="tab-icon">◎</span> Groups</button>
+                <button class='@TabClass("sections")' @onclick='() => _tab = "sections"'><span class="tab-icon">▦</span> Sections</button>
+                <button class='@TabClass("skiplist")' @onclick='() => _tab = "skiplist"'><span class="tab-icon">⚠</span> Skiplist</button>
+            </nav>
+
+            <div class="editor-body">
+                @if (_tab == "basic")
+                {
+                    <div class="panel-grid">
+                        <section class="panel-card">
+                            <h3>Basic</h3>
+                            <div class="form-grid">
+                                <label>Name<input @bind="_form.Name" /></label>
+                                <label>Host<input @bind="_form.Host" /></label>
+                                <label>Port<input type="number" @bind="_form.Port" /></label>
+                                <label>TLS
+                                    <select @bind="_form.TlsMode">
+                                        <option value="@TlsMode.Off">Off</option>
+                                        <option value="@TlsMode.Explicit">Explicit</option>
+                                        <option value="@TlsMode.Implicit">Implicit</option>
+                                    </select>
+                                </label>
+                                <label>User<input @bind="_form.Username" /></label>
+                                <label>Password<input type="password" @bind="_password" placeholder="unchanged if empty" /></label>
+                                <label class="wide">Base path<input @bind="_form.BasePath" /></label>
+                            </div>
+                        </section>
+
+                        <section class="panel-card">
+                            <h3>Limits</h3>
+                            <div class="form-grid">
+                                <label>Login slots<input type="number" @bind="_form.LoginSlots" /></label>
+                                <label>Upload slots<input type="number" @bind="_form.UploadSlots" /></label>
+                                <label>Download slots<input type="number" @bind="_form.DownloadSlots" /></label>
+                                <label>Max idle (s)<input type="number" @bind="_form.MaxIdleSeconds" /></label>
+                                <label>Timeout (s)<input type="number" @bind="_form.TimeoutSeconds" /></label>
+                            </div>
+                        </section>
+                    </div>
+                }
+                else if (_tab == "transfer")
+                {
+                    <div class="panel-grid">
+                        <section class="panel-card">
+                            <h3>Protocol</h3>
+                            <div class="form-grid">
+                                <label>FXP mode
+                                    <select @bind="_form.FxpMode">
+                                        <option value="@FxpMode.Auto">Auto</option>
+                                        <option value="@FxpMode.PasvPort">PASV/PORT</option>
+                                        <option value="@FxpMode.CpsvSsc">CPSV/SSCN</option>
+                                    </select>
+                                </label>
+                                <label>List command
+                                    <select value="@_listCommandChoice" @onchange="OnListCommandChoice">
+                                        @foreach (var option in ListCommandOptions)
+                                        {
+                                            <option value="@option.Command">@option.Label</option>
+                                        }
+                                        <option value="custom">Custom...</option>
+                                    </select>
+                                </label>
+                                @if (_listCommandChoice == "custom")
+                                {
+                                    <label>Custom list command<input @bind="_customListCommand" placeholder="STAT -l" /></label>
+                                }
+                                <label class="wide">Passive host<input @bind="_form.PassiveHost" placeholder="override PASV IP" /></label>
+                                <label>FXP passive side
+                                    <select @bind="_form.FxpPassiveSide">
+                                        <option value="@FxpPassiveSide.Auto">Auto (source listens unless PASV is broken)</option>
+                                        <option value="@FxpPassiveSide.Source">Source listens (PASV on source)</option>
+                                        <option value="@FxpPassiveSide.Destination">Destination listens (PASV on dest)</option>
+                                    </select>
+                                </label>
+                                <label>TLS data client
+                                    <select @bind="_form.SslDataClient">
+                                        <option value="@SslDataClientSide.Auto">Auto (passive side is client)</option>
+                                        <option value="@SslDataClientSide.Source">Source is TLS client</option>
+                                        <option value="@SslDataClientSide.Destination">Destination is TLS client</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <p class="hint">On a TLS FXP exactly one side must be the TLS client. Auto uses the passive side; if a handshake fails WeaveFXP flips the role for that site pair and remembers it.</p>
+                        </section>
+
+                        <section class="panel-card">
+                            <h3>Flags</h3>
+                            <div class="checks cards-checks">
+                                <label><input type="checkbox" @bind="_form.UsePret" /> PRET</label>
+                                <label><input type="checkbox" @bind="_form.UseEpsv" /> EPSV</label>
+                                <label><input type="checkbox" @bind="_form.UseSscn" /> SSCN</label>
+                                <label><input type="checkbox" @bind="_form.SscnSupported" /> SSCN supported</label>
+                                <label><input type="checkbox" @bind="_form.CpsvSupported" /> CPSV</label>
+                                <label><input type="checkbox" @bind="_form.CeprSupported" /> CEPR</label>
+                                <label><input type="checkbox" @bind="_form.UseXdupe" /> XDUPE</label>
+                                <label><input type="checkbox" @bind="_form.ForceBinary" /> Binary</label>
+                                <label><input type="checkbox" @bind="_form.BrokenPasv" /> Broken PASV</label>
+                                <label><input type="checkbox" @bind="_form.AllowUpload" /> Allow upload</label>
+                                <label><input type="checkbox" @bind="_form.AllowDownload" /> Allow download</label>
+                            </div>
+                        </section>
+
+                        <section class="panel-card">
+                            <h3>Racing direction</h3>
+                            <div class="checks cards-checks">
+                                <label><input type="checkbox" @bind="_form.BlockTransferTo" /> Block transfer TO this site</label>
+                                <label><input type="checkbox" @bind="_form.BlockTransferFrom" /> Block transfer FROM this site</label>
+                            </div>
+                            <p class="hint">Race spreads run in every direction between the selected sites (1 → 2 and 2 → 1). These blocks take a site out of the mesh as destination or source.</p>
+                            <div class="form-grid">
+                                <label>Slow skip (KB/s)<input type="number" min="0" @bind="_form.SlowSkipKBps" placeholder="0 = off" /></label>
+                                <label>XDUPE mode
+                                    <select @bind="_form.XdupeMode">
+                                        <option value="3">3 - detailed duplicate names</option>
+                                        <option value="1">1 - basic duplicate mode</option>
+                                        <option value="2">2 - extended duplicate mode</option>
+                                        <option value="4">4 - server-specific mode</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <p class="hint">Abort a race file averaging below this speed and move to the next one. Enforced as a time budget (size ÷ speed + grace), since FXP data doesn't pass through the client.</p>
+                            <p class="hint">XDUPE mode is sent as <code>SITE XDUPE &lt;mode&gt;</code> after login when XDUPE is enabled. Use mode 3 unless your FTPd/site docs require another value; it lets the server report duplicate filenames so the racer can skip already-present files faster.</p>
+                        </section>
+
+                        <section class="panel-card">
+                            <div class="sub-editor-head">
+                                <h3>Completion</h3>
+                                <button class="secondary slim" @onclick="AddCompleteMarker">
+                                    <span class="btn-icon">＋</span>
+                                    Add marker
+                                </button>
+                            </div>
+                            <p class="hint">SFV is checked automatically when it is readable. These markers are still needed as the site-specific fallback/stop signal for releases without a usable SFV, server-made COMPLETE folders and custom status folders. Plain markers match as words; use * and ? for custom patterns.</p>
+                            <div class="list-grid list-head">
+                                <span>Marker</span>
+                                <span></span>
+                            </div>
+                            @if (_form.CompleteMarkers.Count == 0)
+                            {
+                                <div class="empty-row compact">No completion markers configured</div>
+                            }
+                            @for (var i = 0; i < _form.CompleteMarkers.Count; i++)
+                            {
+                                var index = i;
+                                <div class="list-grid">
+                                    <input placeholder="COMPLETE" @bind="_form.CompleteMarkers[index]" />
+                                    <button class="secondary icon-btn danger" title="Remove marker" @onclick="() => RemoveCompleteMarker(index)">×</button>
+                                </div>
+                            }
+                        </section>
+                    </div>
+                }
+                else if (_tab == "affils")
+                {
+                    <section class="panel-card full">
+                        <div class="sub-editor-head">
+                            <h3>Groups / Affils</h3>
+                            <button class="secondary slim" @onclick="AddAffil">
+                                <span class="btn-icon">＋</span>
+                                Add group
+                            </button>
+                        </div>
+                        <div class="list-grid list-head">
+                            <span>Group</span>
+                            <span></span>
+                        </div>
+                        @if (_form.Affils.Count == 0)
+                        {
+                            <div class="empty-row compact">No groups configured</div>
+                        }
+                        @for (var i = 0; i < _form.Affils.Count; i++)
+                        {
+                            var index = i;
+                            <div class="list-grid">
+                                <input placeholder="GROUP" @bind="_form.Affils[index]" />
+                                <button class="secondary icon-btn danger" title="Remove group" @onclick="() => RemoveAffil(index)">×</button>
+                            </div>
+                        }
+                    </section>
+                }
+                else if (_tab == "sections")
+                {
+                    <section class="panel-card full">
+                        <div class="sub-editor-head">
+                            <h3>Sections</h3>
+                            <button class="secondary slim" @onclick="AddSection">
+                                <span class="btn-icon">＋</span>
+                                Add section
+                            </button>
+                        </div>
+                        <div class="section-grid section-head">
+                            <span>Name</span>
+                            <span>Section</span>
+                            <span></span>
+                        </div>
+                        @if (_form.Sections.Count == 0)
+                        {
+                            <div class="empty-row compact">No sections configured</div>
+                        }
+                        @foreach (var (row, i) in _form.Sections.Select((r, i) => (r, i)))
+                        {
+                            <div class="section-grid">
+                                <input placeholder="TV" @bind="row.Name" />
+                                <input placeholder="/TV" @bind="row.Section" />
+                                <button class="secondary icon-btn danger" title="Remove section" @onclick="() => _form.Sections.RemoveAt(i)">×</button>
+                            </div>
+                        }
+                    </section>
+                }
+                else
+                {
+                    <section class="panel-card full">
+                        <div class="sub-editor-head">
+                            <h3>Skiplist</h3>
+                            <button class="secondary slim" @onclick="AddSkipPattern">
+                                <span class="btn-icon">＋</span>
+                                Add pattern
+                            </button>
+                        </div>
+                        <p class="hint">Plain text matches anywhere in the name or path. Use * and ? for wildcard patterns.</p>
+                        <div class="list-grid list-head">
+                            <span>Pattern</span>
+                            <span></span>
+                        </div>
+                        @if (_form.Skiplist.Count == 0)
+                        {
+                            <div class="empty-row compact">No skip patterns configured</div>
+                        }
+                        @for (var i = 0; i < _form.Skiplist.Count; i++)
+                        {
+                            var index = i;
+                            <div class="list-grid">
+                                <input placeholder="sample or *incomplete*" @bind="_form.Skiplist[index]" />
+                                <button class="secondary icon-btn danger" title="Remove pattern" @onclick="() => RemoveSkipPattern(index)">×</button>
+                            </div>
+                        }
+                    </section>
+                }
+
+                @if (_probeResult is not null)
+                {
+                    <pre class="console">@_probeResult</pre>
+                }
+            </div>
+        </section>
+    </div>
+</div>
+
+@if (_toast is not null)
+{
+    <div class="toast show" @key="_toast">@_toast</div>
+}
+
+@code {
+    private List<Site> _sites = new();
+    private Site _form = new();
+    private string? _editing;
+    private string _password = "";
+    private string _listCommandChoice = "STAT -l";
+    private string _customListCommand = "";
+    private string _tab = "basic";
+    private string? _probeResult;
+    private string? _toast;
+
+    protected override void OnInitialized()
+    {
+        _sites = Engine.Sites(true);
+        if (_sites.Count > 0) EditSite(_sites[0].Name);
+        else NewSite();
+    }
+
+    private void NewSite()
+    {
+        _editing = null;
+        _password = "";
+        _listCommandChoice = "STAT -l";
+        _customListCommand = "";
+        _probeResult = null;
+        _tab = "basic";
+        _form = new Site
+        {
+            Port = 21,
+            Username = "anonymous",
+            BasePath = "/",
+            ListCommand = "STAT -l",
+            LoginSlots = 1,
+            DownloadSlots = 1,
+            XdupeMode = 3,
+            MaxIdleSeconds = 30,
+            TimeoutSeconds = 30,
+            AllowDownload = true,
+            CompleteMarkers = Site.DefaultCompleteMarkers(),
+            Affils = new(),
+            Skiplist = new(),
+            Sections = new(),
+        };
+    }
+
+    private void EditSite(string name)
+    {
+        var site = _sites.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (site is null) return;
+        _editing = name;
+        _password = "";
+        SetListCommand(site.ListCommand);
+        _probeResult = null;
+        _form = new Site
+        {
+            Name = site.Name, Host = site.Host, Port = site.Port, Username = site.Username,
+            TlsMode = site.TlsMode, UsePret = site.UsePret, UseEpsv = site.UseEpsv, UseSscn = site.UseSscn,
+            CeprSupported = site.CeprSupported, SscnSupported = site.SscnSupported, CpsvSupported = site.CpsvSupported,
+            FxpMode = site.FxpMode, PassiveHost = site.PassiveHost, BasePath = site.BasePath, ListCommand = site.ListCommand,
+            LoginSlots = site.LoginSlots, UploadSlots = site.UploadSlots, DownloadSlots = site.DownloadSlots,
+            ForceBinary = site.ForceBinary, BrokenPasv = site.BrokenPasv, UseXdupe = site.UseXdupe, XdupeMode = site.XdupeMode,
+            MaxIdleSeconds = site.MaxIdleSeconds, TimeoutSeconds = site.TimeoutSeconds, AllowUpload = site.AllowUpload, AllowDownload = site.AllowDownload,
+            CompleteMarkers = new List<string>(site.CompleteMarkers.Count > 0 ? site.CompleteMarkers : Site.DefaultCompleteMarkers()),
+            Affils = new List<string>(site.Affils),
+            Skiplist = new List<string>(site.Skiplist),
+            Sections = site.Sections.Select(x => new SiteSection { Name = x.Name, Section = x.Section }).ToList(),
+        };
+    }
+
+    private void Reload()
+    {
+        var current = _editing;
+        _sites = Engine.Sites(true);
+        if (!string.IsNullOrEmpty(current) && _sites.Any(s => s.Name == current)) EditSite(current);
+        else if (_sites.Count > 0) EditSite(_sites[0].Name);
+        else NewSite();
+        Toast("Sites loaded");
+    }
+
+    private void SelectExisting(ChangeEventArgs e)
+    {
+        var name = e.Value?.ToString() ?? "";
+        if (string.IsNullOrWhiteSpace(name)) NewSite();
+        else EditSite(name);
+    }
+
+    private void Duplicate()
+    {
+        if (_editing is null) return;
+        _editing = null;
+        _form.Name = NextCopyName(_form.Name);
+        _password = "";
+        _tab = "basic";
+        Toast("Duplicated form; enter password and save");
+    }
+
+    private void AddSection() => _form.Sections.Add(new SiteSection());
+    private void AddAffil() => _form.Affils.Add("");
+    private void AddCompleteMarker() => _form.CompleteMarkers.Add("COMPLETE");
+    private void AddSkipPattern() => _form.Skiplist.Add("*incomplete*");
+
+    private void RemoveAffil(int index)
+    {
+        if (index >= 0 && index < _form.Affils.Count)
+            _form.Affils.RemoveAt(index);
+    }
+
+    private void RemoveCompleteMarker(int index)
+    {
+        if (index >= 0 && index < _form.CompleteMarkers.Count)
+            _form.CompleteMarkers.RemoveAt(index);
+    }
+
+    private void RemoveSkipPattern(int index)
+    {
+        if (index >= 0 && index < _form.Skiplist.Count)
+            _form.Skiplist.RemoveAt(index);
+    }
+
+    private void Save()
+    {
+        ApplyListCommand();
+        _form.Password = _password;
+        _form.CompleteMarkers = NormalizeList(_form.CompleteMarkers);
+        _form.Affils = NormalizeList(_form.Affils);
+        _form.Skiplist = NormalizeList(_form.Skiplist);
+        try
+        {
+            var saved = _editing is null ? Engine.AddSite(_form) : Engine.SaveSite(_editing, _form);
+            _sites = Engine.Sites(true);
+            EditSite(saved.Name);
+            Toast($"Site {saved.Name} saved");
+        }
+        catch (Exception ex) { Toast(ex.Message); }
+    }
+
+    private void Delete()
+    {
+        if (_editing is null) return;
+        try
+        {
+            Engine.RemoveSite(_editing);
+            _sites = Engine.Sites(true);
+            NewSite();
+            Toast("Site deleted");
+        }
+        catch (Exception ex) { Toast(ex.Message); }
+    }
+
+    private async Task Probe()
+    {
+        if (_editing is null) return;
+        _probeResult = "Probing...";
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Engine.ProbeSiteAsync(_editing);
+            _probeResult = System.Text.Json.JsonSerializer.Serialize(result,
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        }
+        catch (Exception ex) { _probeResult = "Error: " + ex.Message; }
+    }
+
+    private string LoadedLabel() => _editing is null ? "New site profile." : $"Loaded site '{_editing}'.";
+    private string TabClass(string tab) => $"editor-tab {(_tab == tab ? "active" : "")}";
+
+    private static readonly (string Command, string Label)[] ListCommandOptions =
+    {
+        ("STAT -l", "STAT -l  (drFTPd/glFTPd style stats)"),
+        ("STAT -la", "STAT -la  (include hidden)"),
+        ("LIST", "LIST  (classic listing)"),
+        ("LIST -al", "LIST -al  (classic detailed + hidden)"),
+        ("MLSD", "MLSD  (machine listing)"),
+        ("NLST", "NLST  (names only)"),
+    };
+
+    private void OnListCommandChoice(ChangeEventArgs e)
+    {
+        _listCommandChoice = e.Value?.ToString() ?? "STAT -l";
+        if (_listCommandChoice != "custom")
+            _form.ListCommand = _listCommandChoice;
+        else if (string.IsNullOrWhiteSpace(_customListCommand))
+            _customListCommand = _form.ListCommand;
+    }
+
+    private void SetListCommand(string command)
+    {
+        command = string.IsNullOrWhiteSpace(command) ? "STAT -l" : command.Trim();
+        if (ListCommandOptions.Any(x => x.Command.Equals(command, StringComparison.OrdinalIgnoreCase)))
+        {
+            _listCommandChoice = command;
+            _customListCommand = "";
+        }
+        else
+        {
+            _listCommandChoice = "custom";
+            _customListCommand = command;
+        }
+    }
+
+    private void ApplyListCommand()
+    {
+        _form.ListCommand = _listCommandChoice == "custom"
+            ? (string.IsNullOrWhiteSpace(_customListCommand) ? "STAT -l" : _customListCommand.Trim())
+            : _listCommandChoice;
+    }
+
+    private static List<string> NormalizeList(IEnumerable<string>? values)
+    {
+        return (values ?? Enumerable.Empty<string>())
+            .Select(x => (x ?? "").Trim())
+            .Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private string NextCopyName(string name)
+    {
+        var root = string.IsNullOrWhiteSpace(name) ? "site" : name.Trim();
+        var candidate = root + "-copy";
+        var i = 2;
+        while (_sites.Any(s => s.Name.Equals(candidate, StringComparison.OrdinalIgnoreCase)))
+        {
+            candidate = $"{root}-copy-{i}";
+            i++;
+        }
+        return candidate;
+    }
+
+    private void Toast(string message)
+    {
+        _toast = message;
+        _ = HideToastLater();
+    }
+
+    private async Task HideToastLater()
+    {
+        await Task.Delay(2600);
+        _toast = null;
+        await InvokeAsync(StateHasChanged);
+    }
+}

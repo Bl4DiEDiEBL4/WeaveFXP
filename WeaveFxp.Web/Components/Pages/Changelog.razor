@@ -1,0 +1,55 @@
+@page "/changelog"
+@inject WeaveEngine Engine
+
+<h1 class="visually-hidden">Changelog</h1>
+
+<div class="page docs-page">
+    <header class="page-head page-head-lg">
+        <div>
+            <div class="eyebrow">Release Notes</div>
+            <h2><span class="title-icon">▣</span> Changelog</h2>
+            <p class="page-sub">Current version: v1.0.0</p>
+        </div>
+    </header>
+
+    <section class="doc-page changelog-page">
+        <section class="doc-hero">
+            <div>
+                <span class="doc-kicker">Current build</span>
+                <h2>v1.0.0</h2>
+                <p>First public baseline for the C#/.NET Razor build of WeaveFXP.</p>
+            </div>
+        </section>
+
+        <section class="timeline">
+            <article class="timeline-item current">
+                <div class="timeline-version">v1.0.0</div>
+                <div class="timeline-date">August 2026</div>
+                <ul>
+                    <li>Converted the client to C#/.NET 8 with Razor/Blazor Server UI.</li>
+                    <li>Added dark desktop shell, sidebar navigation, tabbed Settings and tabbed Site Manager.</li>
+                    <li>Added single self-contained publish script for Windows x64, Linux x64 and Linux ARM64.</li>
+                    <li>Added local data folder creation next to the executable on first start.</li>
+                    <li>Added Site Manager support for sections, groups, affils, skiplist entries and per-site completion markers.</li>
+                    <li>Added clearer XDUPE mode selection and help text for duplicate-aware FTP servers.</li>
+                    <li>Added FTP browse tabs, local browser mode, drive selection, default download folder, uploads and local downloads.</li>
+                    <li>Added right-click command shells and context actions for browses, queue rows and logs.</li>
+                    <li>Added direct transfer, queue, start, cancel, pause, retry, restart and remove job actions.</li>
+                    <li>Added transfer speeds, progress bars, per-file transfer rows, aggregate stats and race history.</li>
+                    <li>Added API endpoints for sites, settings, jobs, transfers, releases, logs, raw FTP commands and compatibility clients.</li>
+                    <li>Added History, Logs, API examples and Changelog pages.</li>
+                    <li>Added API/system/FTP/transfer logging and settings actions to clear runtime data.</li>
+                    <li>Added CP437 decoding for FTP banners, rules, IMDB text and server artwork in logs.</li>
+                    <li>Added sortable file columns and resizable browser/status/log panels.</li>
+                    <li>Added race completion checks that stop queued spread/race jobs when a completion marker or complete SFV is detected.</li>
+                    <li>Clarified completion markers as a site-specific fallback/stop signal beside automatic SFV checks.</li>
+                    <li>Added dashboard startup view, app logo assets, executable icon and Windows tray controls.</li>
+                    <li>Added skip-empty-folders, global skiplist, global transfer order and site-order settings.</li>
+                    <li>Added browser refresh persistence and automatic destination refresh after completed transfers.</li>
+                    <li>Added watchdog handling so interrupted or stalled running jobs become failed instead of staying running forever.</li>
+                    <li>Improved live job update performance by avoiding full state clones during high-frequency progress updates.</li>
+                </ul>
+            </article>
+        </section>
+    </section>
+</div>

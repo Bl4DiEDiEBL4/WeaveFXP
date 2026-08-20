@@ -1,0 +1,527 @@
+@page "/settings"
+@using WeaveFxp.Web.Services
+@inject WeaveEngine Engine
+@inject TrayNotificationService TrayService
+
+<h1 class="visually-hidden">Settings</h1>
+
+<div class="page settings-page">
+    <header class="page-head page-head-lg">
+        <div>
+            <div class="eyebrow">Runtime</div>
+            <h2><span class="title-icon">⚙</span> Settings</h2>
+            <p class="page-sub">Binary, network, transfer and API settings.</p>
+        </div>
+        <div class="page-actions">
+            <button @onclick="Save">
+                <span class="btn-icon">▣</span>
+                Save settings
+            </button>
+        </div>
+    </header>
+
+    <section class="settings-overview card-grid">
+        <article class="card">
+            <div class="card-title">WEB ACCESS</div>
+            <table class="info-table">
+                <tbody>
+                    <tr><td>Listening on</td><td>@_form.WebBindAddress:@_form.WebPort</td></tr>
+                    <tr><td>Reachable from</td><td><span class="pill @(_form.WebBindAddress is "127.0.0.1" or "localhost" ? "on" : "busy")">@ReachLabel()</span></td></tr>
+                    <tr><td>Version</td><td>v1.0.0</td></tr>
+                </tbody>
+            </table>
+            <p class="hint">Web bind/port changes are read at startup, so save and restart the exe after changing them.</p>
+        </article>
+
+        <article class="card">
+            <div class="card-title">ENGINE</div>
+            <label class="opt"><input type="checkbox" @bind="_form.DebugLogging" /> <span><span class="opt-name">Debug logging</span><span class="fh">Verbose diagnostics for troubleshooting.</span></span></label>
+            <label class="opt"><input type="checkbox" @bind="_form.UseActiveModeAddress" /> <span><span class="opt-name">Active address</span><span class="fh">Use the configured active-mode IP when needed.</span></span></label>
+        </article>
+
+        <article class="card">
+            <div class="card-title">UPDATES</div>
+            <label class="opt"><input type="checkbox" @bind="_form.CheckForUpdates" /> <span><span class="opt-name">Check for updates</span><span class="fh">Shows update status later; no popup and no automatic install.</span></span></label>
+            <table class="info-table tight"><tbody><tr><td>Current version</td><td>v1.0.0</td></tr></tbody></table>
+        </article>
+
+        <article class="card">
+            <div class="card-title">NOTIFICATIONS</div>
+            <label class="opt"><input type="checkbox" @bind="_form.TrayIconEnabled" /> <span><span class="opt-name">Tray icon</span><span class="fh">Windows notification area icon with dashboard, notification and stop controls.</span></span></label>
+            <label class="opt"><input type="checkbox" @bind="_form.TransferNotificationsEnabled" disabled="@(!_form.TrayIconEnabled)" /> <span><span class="opt-name">Transfer notifications</span><span class="fh">Notify completed and failed transfer jobs.</span></span></label>
+            <label class="opt"><input type="checkbox" @bind="_form.ApiNotificationsEnabled" disabled="@(!_form.TrayIconEnabled)" /> <span><span class="opt-name">API notifications</span><span class="fh">Notify important API-triggered activity.</span></span></label>
+            <div class="settings-status-row"><span>Status</span><strong>@TrayStatus()</strong></div>
+        </article>
+
+        <article class="card">
+            <div class="card-title">DATA FOLDER</div>
+            <p class="path">@Engine.DataDir</p>
+            <p class="fh">State, keys and future history/database files live here next to the executable.</p>
+            <table class="info-table tight">
+                <tbody>
+                    @foreach (var row in DataCounts())
+                    {
+                        <tr><td>@row.Name</td><td>@row.Count file(s)</td></tr>
+                    }
+                </tbody>
+            </table>
+        </article>
+
+        <article class="card data-maintenance-card">
+            <div class="card-title">DATA MAINTENANCE</div>
+            <table class="info-table tight">
+                <tbody>
+                    @foreach (var row in RuntimeCounts())
+                    {
+                        <tr><td>@row.Name</td><td>@row.Count row(s)</td></tr>
+                    }
+                </tbody>
+            </table>
+            <div class="maintenance-actions">
+                <button class="secondary slim" @onclick="ClearLogs">
+                    <span class="btn-icon">≡</span>
+                    Clear logs
+                </button>
+                <button class="secondary slim" @onclick="ClearJobs">
+                    <span class="btn-icon">⇄</span>
+                    Clear jobs
+                </button>
+                <button class="secondary slim" @onclick="ClearReleases">
+                    <span class="btn-icon">✓</span>
+                    Clear release checks
+                </button>
+                <button class="secondary slim" @onclick="ClearDupes">
+                    <span class="btn-icon">⊘</span>
+                    Clear dupes
+                </button>
+                <button class="danger slim" @onclick="ClearRuntimeData">
+                    <span class="btn-icon">×</span>
+                    Clear runtime data
+                </button>
+            </div>
+            <p class="hint">These actions keep sites and settings, but remove stored activity data from the current state file.</p>
+        </article>
+    </section>
+
+    <section class="settings-shell">
+        <nav class="editor-tabs">
+            <button class='@TabClass("web")' @onclick='() => _tab = "web"'><span class="tab-icon">◉</span> Web</button>
+            <button class='@TabClass("connection")' @onclick='() => _tab = "connection"'><span class="tab-icon">⌁</span> Connection</button>
+            <button class='@TabClass("transfers")' @onclick='() => _tab = "transfers"'><span class="tab-icon">⇄</span> Transfers</button>
+            <button class='@TabClass("api")' @onclick='() => _tab = "api"'><span class="tab-icon">▣</span> API</button>
+        </nav>
+
+        <div class="editor-body">
+            @if (_tab == "web")
+            {
+                <div class="panel-grid">
+                    <section class="panel-card">
+                        <h3>WebUI Access</h3>
+                        <div class="callout">Change the WebUI port and bind address here. Save and restart WeaveFXP for these startup settings to apply.</div>
+                        <div class="form-grid">
+                            <label>Bind address<input @bind="_form.WebBindAddress" placeholder="127.0.0.1" /></label>
+                            <label>Port<input type="number" @bind="_form.WebPort" /></label>
+                        </div>
+                    </section>
+
+                    <section class="panel-card">
+                        <h3>Remote / SSL</h3>
+                        <div class="callout">Recommended public setup: keep WeaveFXP listening on 127.0.0.1 and put a reverse proxy with HTTPS in front of it.</div>
+                        <label class="wide text-block">Caddy example
+                            <textarea readonly rows="4">weavefxp.example.com {
+    reverse_proxy 127.0.0.1:@_form.WebPort
+}</textarea>
+                        </label>
+                    </section>
+                </div>
+            }
+            else if (_tab == "connection")
+            {
+                <div class="panel-grid">
+                    <section class="panel-card">
+                        <h3>Network</h3>
+                        <div class="form-grid">
+                            <label class="wide">Bind interface
+                                <select @bind="_form.BindInterface">
+                                    <option value="">Auto (all interfaces)</option>
+                                    @foreach (var i in _interfaces.Where(x => !x.Loopback))
+                                    {
+                                        <option value="@i.Value">@i.Name — @i.Address (@(i.IPv6 ? "IPv6" : "IPv4"))</option>
+                                    }
+                                </select>
+                            </label>
+                            <label>Local protocol
+                                <select @bind="_form.LocalTransferProtocol">
+                                    <option value="@TransferProtocol.PreferIPv4">Prefer IPv4</option>
+                                    <option value="@TransferProtocol.IPv4Only">IPv4 only</option>
+                                    <option value="@TransferProtocol.IPv6Only">IPv6 only</option>
+                                    <option value="@TransferProtocol.Any">Any</option>
+                                </select>
+                            </label>
+                        </div>
+                    </section>
+
+                    <section class="panel-card">
+                        <h3>Active Mode</h3>
+                        <div class="form-grid">
+                            <label>Port start<input type="number" @bind="_form.ActiveModePortRange.Start" /></label>
+                            <label>Port end<input type="number" @bind="_form.ActiveModePortRange.End" /></label>
+                            <label>Active IPv4<input @bind="_form.ActiveModeAddressIPv4" /></label>
+                            <label>Active IPv6<input @bind="_form.ActiveModeAddressIPv6" /></label>
+                            <div class="checks wide">
+                                <label><input type="checkbox" @bind="_form.UseActiveModeAddress" /> Use active address</label>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            }
+            else if (_tab == "transfers")
+            {
+                <div class="panel-grid">
+                    <section class="panel-card">
+                        <h3>Concurrency</h3>
+                        <div class="form-grid">
+                            <label>Max FXP jobs<input type="number" @bind="_form.MaxConcurrentFxpJobs" /></label>
+                            <label>Max race jobs<input type="number" @bind="_form.MaxConcurrentRaceJobs" /></label>
+                        </div>
+                    </section>
+
+                    <section class="panel-card">
+                        <h3>Racing</h3>
+                        <div class="form-grid">
+                            <label>Poll interval (ms)<input type="number" min="100" max="30000" @bind="_form.RacePollIntervalMs" /></label>
+                            <label>Stop after idle cycles<input type="number" min="1" @bind="_form.RaceMaxIdleCycles" /></label>
+                        </div>
+                        <p class="fh">A race re-lists the source every poll interval and moves new files as they land. It stops when the release is complete, or after this many polls with no new files.</p>
+                        <div class="checks">
+                            <label><input type="checkbox" @bind="_form.FtpDebugLog" /> Debug: also log FTP protocol for API-triggered races</label>
+                        </div>
+                        <p class="fh">Manual browsing, transfers and downloads always write to the FTP Log. Races started over the API run silent so logging does not cost throughput; tick this only when debugging one.</p>
+                    </section>
+
+                    <section class="panel-card">
+                        <h3>Local</h3>
+                        <div class="form-grid">
+                            <label class="wide">Download folder<input @bind="_form.DownloadDir" placeholder="downloads" /></label>
+                        </div>
+                    </section>
+
+                    <section class="panel-card">
+                        <h3>Behavior</h3>
+                        <div class="form-grid">
+                            <label>Job timeout (minutes)<input type="number" min="5" max="10080" @bind="_form.JobWatchdogTimeoutMinutes" /></label>
+                        </div>
+                        <label class="opt"><input type="checkbox" @bind="_form.SkipEmptyFolders" /> <span><span class="opt-name">Skip empty folders</span><span class="fh">Do not create destination folders when nothing transferable is inside.</span></span></label>
+                    </section>
+
+                    <section class="panel-card full">
+                        <div class="sub-editor-head">
+                            <h3>Global Skiplist</h3>
+                            <button class="secondary slim" @onclick="AddGlobalSkipPattern">
+                                <span class="btn-icon">＋</span>
+                                Add pattern
+                            </button>
+                        </div>
+                        <p class="hint">Applied before every site skiplist. Plain text matches names/paths; * and ? work as wildcards.</p>
+                        <div class="list-grid list-head">
+                            <span>Pattern</span>
+                            <span></span>
+                        </div>
+                        @if (_form.GlobalSkiplist.Count == 0)
+                        {
+                            <div class="empty-row compact">No global skip patterns configured</div>
+                        }
+                        @for (var i = 0; i < _form.GlobalSkiplist.Count; i++)
+                        {
+                            var index = i;
+                            <div class="list-grid">
+                                <input placeholder="Sample or *proof*" @bind="_form.GlobalSkiplist[index]" />
+                                <button class="secondary icon-btn danger" title="Remove pattern" @onclick="() => RemoveGlobalSkipPattern(index)">×</button>
+                            </div>
+                        }
+                    </section>
+
+                    <section class="panel-card full">
+                        <div class="sub-editor-head">
+                            <h3>Global Order List</h3>
+                            <button class="secondary slim" @onclick="AddGlobalOrderPattern">
+                                <span class="btn-icon">＋</span>
+                                Add pattern
+                            </button>
+                        </div>
+                        <p class="hint">Matched rows transfer first, in this order. Plain text and * / ? wildcards are supported.</p>
+                        <div class="order-grid list-head">
+                            <span>Pattern</span>
+                            <span>Order</span>
+                            <span></span>
+                        </div>
+                        @if (_form.GlobalOrderList.Count == 0)
+                        {
+                            <div class="empty-row compact">No global transfer order configured</div>
+                        }
+                        @for (var i = 0; i < _form.GlobalOrderList.Count; i++)
+                        {
+                            var index = i;
+                            <div class="order-grid">
+                                <input placeholder="*.sfv or *.nfo" @bind="_form.GlobalOrderList[index]" />
+                                <span class="order-buttons">
+                                    <button class="secondary icon-btn" title="Move up" disabled="@(index == 0)" @onclick="() => MoveGlobalOrder(index, -1)">↑</button>
+                                    <button class="secondary icon-btn" title="Move down" disabled="@(index >= _form.GlobalOrderList.Count - 1)" @onclick="() => MoveGlobalOrder(index, 1)">↓</button>
+                                </span>
+                                <button class="secondary icon-btn danger" title="Remove pattern" @onclick="() => RemoveGlobalOrderPattern(index)">×</button>
+                            </div>
+                        }
+                    </section>
+
+                    <section class="panel-card full">
+                        <div class="sub-editor-head">
+                            <h3>Site Order</h3>
+                            <div class="inline-actions">
+                                <select @bind="_siteOrderCandidate">
+                                    <option value="">Select site</option>
+                                    @foreach (var site in AvailableOrderSites())
+                                    {
+                                        <option value="@site.Name">@site.Name</option>
+                                    }
+                                </select>
+                                <button class="secondary slim" disabled="@(!AvailableOrderSites().Any())" @onclick="AddSiteOrder">
+                                    <span class="btn-icon">＋</span>
+                                    Add site
+                                </button>
+                            </div>
+                        </div>
+                        <p class="hint">Controls the default order for site dropdowns and site lists. Sites not listed here are shown after these.</p>
+                        <div class="order-grid list-head">
+                            <span>Site</span>
+                            <span>Order</span>
+                            <span></span>
+                        </div>
+                        @if (_form.SiteOrder.Count == 0)
+                        {
+                            <div class="empty-row compact">No preferred order configured</div>
+                        }
+                        @for (var i = 0; i < _form.SiteOrder.Count; i++)
+                        {
+                            var index = i;
+                            <div class="order-grid">
+                                <span class="order-name">@_form.SiteOrder[index]</span>
+                                <span class="order-buttons">
+                                    <button class="secondary icon-btn" title="Move up" disabled="@(index == 0)" @onclick="() => MoveSiteOrder(index, -1)">↑</button>
+                                    <button class="secondary icon-btn" title="Move down" disabled="@(index >= _form.SiteOrder.Count - 1)" @onclick="() => MoveSiteOrder(index, 1)">↓</button>
+                                </span>
+                                <button class="secondary icon-btn danger" title="Remove site" @onclick="() => RemoveSiteOrder(index)">×</button>
+                            </div>
+                        }
+                    </section>
+                </div>
+            }
+            else
+            {
+                <div class="panel-grid">
+                    <section class="panel-card">
+                        <h3>HTTP / JSON</h3>
+                        <div class="form-grid">
+                            <label>HTTP/JSON port<input type="number" @bind="_form.HttpsJsonApiPort" /></label>
+                            <label>API listen
+                                <select @bind="_form.ApiListeningMode">
+                                    <option value="@ApiListenMode.Local">Local</option>
+                                    <option value="@ApiListenMode.All">All interfaces</option>
+                                    <option value="@ApiListenMode.Interface">Interface</option>
+                                </select>
+                            </label>
+                            <label class="wide">API password<input type="password" @bind="_apiPassword" placeholder="leave empty to keep current password" /></label>
+                            <div class="checks wide">
+                                <label><input type="checkbox" @bind="_form.EnableHttpsJsonApi" /> HTTP/JSON API</label>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="panel-card">
+                        <h3>UDP API</h3>
+                        <div class="form-grid">
+                            <label>UDP API port<input type="number" @bind="_form.UdpApiPort" /></label>
+                            <label>UDP mode<input @bind="_form.UdpApiMode" /></label>
+                            <div class="checks wide">
+                                <label><input type="checkbox" @bind="_form.EnableUdpApi" /> UDP API</label>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            }
+
+            <div class="settings-state">
+                <span class="tab-icon">▣</span>
+                State: @Engine.StatePath
+            </div>
+        </div>
+    </section>
+</div>
+
+@if (_toast is not null)
+{
+    <div class="toast show" @key="_toast">@_toast</div>
+}
+
+@code {
+    private AppSettings _form = new();
+    private List<NetworkInterfaceInfo> _interfaces = new();
+    private List<Site> _sites = new();
+    private string _tab = "web";
+    private string _apiPassword = "";
+    private string _siteOrderCandidate = "";
+    private string? _toast;
+
+    protected override void OnInitialized()
+    {
+        _form = Engine.Settings(true);
+        _form.ActiveModePortRange ??= new PortRange();
+        _interfaces = Engine.Interfaces();
+        _sites = Engine.Sites(true);
+        EnsureSiteOrderCandidate();
+    }
+
+    private void Save()
+    {
+        _form.ApiPassword = _apiPassword;
+        try
+        {
+            Engine.UpdateSettings(_form);
+            _apiPassword = "";
+            _form = Engine.Settings(true);
+            _sites = Engine.Sites(true);
+            EnsureSiteOrderCandidate();
+            Toast("Settings saved");
+        }
+        catch (Exception ex) { Toast(ex.Message); }
+    }
+
+    private string TabClass(string tab) => $"editor-tab {(_tab == tab ? "active" : "")}";
+    private string ReachLabel() => _form.WebBindAddress is "127.0.0.1" or "localhost" ? "This machine only" : "Other machines";
+    private string TrayStatus() => TrayService.StatusText;
+
+    private void AddGlobalSkipPattern() => _form.GlobalSkiplist.Add("");
+
+    private void RemoveGlobalSkipPattern(int index)
+    {
+        if (index >= 0 && index < _form.GlobalSkiplist.Count)
+            _form.GlobalSkiplist.RemoveAt(index);
+    }
+
+    private void AddGlobalOrderPattern() => _form.GlobalOrderList.Add("");
+
+    private void RemoveGlobalOrderPattern(int index)
+    {
+        if (index >= 0 && index < _form.GlobalOrderList.Count)
+            _form.GlobalOrderList.RemoveAt(index);
+    }
+
+    private void MoveGlobalOrder(int index, int delta)
+    {
+        var next = index + delta;
+        if (index < 0 || index >= _form.GlobalOrderList.Count || next < 0 || next >= _form.GlobalOrderList.Count) return;
+        (_form.GlobalOrderList[index], _form.GlobalOrderList[next]) = (_form.GlobalOrderList[next], _form.GlobalOrderList[index]);
+    }
+
+    private IEnumerable<Site> AvailableOrderSites()
+    {
+        var ordered = _form.SiteOrder ?? new List<string>();
+        return _sites.Where(site => !ordered.Contains(site.Name, StringComparer.OrdinalIgnoreCase));
+    }
+
+    private void AddSiteOrder()
+    {
+        var site = string.IsNullOrWhiteSpace(_siteOrderCandidate)
+            ? AvailableOrderSites().FirstOrDefault()?.Name ?? ""
+            : _siteOrderCandidate.Trim();
+        if (site.Length == 0) return;
+        if (!_form.SiteOrder.Contains(site, StringComparer.OrdinalIgnoreCase))
+            _form.SiteOrder.Add(site);
+        EnsureSiteOrderCandidate();
+    }
+
+    private void RemoveSiteOrder(int index)
+    {
+        if (index >= 0 && index < _form.SiteOrder.Count)
+            _form.SiteOrder.RemoveAt(index);
+        EnsureSiteOrderCandidate();
+    }
+
+    private void MoveSiteOrder(int index, int delta)
+    {
+        var next = index + delta;
+        if (index < 0 || index >= _form.SiteOrder.Count || next < 0 || next >= _form.SiteOrder.Count) return;
+        (_form.SiteOrder[index], _form.SiteOrder[next]) = (_form.SiteOrder[next], _form.SiteOrder[index]);
+    }
+
+    private void EnsureSiteOrderCandidate()
+    {
+        _siteOrderCandidate = AvailableOrderSites().FirstOrDefault()?.Name ?? "";
+    }
+
+    private IEnumerable<(string Name, int Count)> DataCounts()
+    {
+        var root = Engine.DataDir;
+        foreach (var name in new[] { "state", "keys", "downloads", "logs", "history" })
+        {
+            var path = name == "state" ? Engine.StatePath : Path.Combine(root, name);
+            var count = File.Exists(path) ? 1 : Directory.Exists(path) ? Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories).Count() : 0;
+            yield return (name, count);
+        }
+    }
+
+    private IEnumerable<(string Name, int Count)> RuntimeCounts()
+    {
+        yield return ("logs", Engine.RecentLogs(3000).Count);
+        yield return ("jobs", Engine.Jobs().Count);
+        yield return ("release checks", Engine.Releases().Count);
+        yield return ("dupes", Engine.DupeCount());
+    }
+
+    private void ClearLogs()
+    {
+        var count = Engine.ClearLogs();
+        Toast($"Cleared {count} log row(s)");
+        StateHasChanged();
+    }
+
+    private void ClearJobs()
+    {
+        var count = Engine.ClearJobs();
+        Toast($"Cleared {count} job row(s)");
+        StateHasChanged();
+    }
+
+    private void ClearReleases()
+    {
+        var count = Engine.ClearReleases();
+        Toast($"Cleared {count} release check row(s)");
+        StateHasChanged();
+    }
+
+    private void ClearDupes()
+    {
+        var count = Engine.ClearDupes();
+        Toast($"Cleared {count} dupe row(s)");
+        StateHasChanged();
+    }
+
+    private void ClearRuntimeData()
+    {
+        var result = Engine.ClearRuntimeData();
+        Toast($"Cleared {result.Jobs} jobs, {result.Releases} releases, {result.Dupes} dupes, {result.Logs} logs");
+        StateHasChanged();
+    }
+
+    private void Toast(string message)
+    {
+        _toast = message;
+        _ = HideToastLater();
+    }
+
+    private async Task HideToastLater()
+    {
+        await Task.Delay(2600);
+        _toast = null;
+        await InvokeAsync(StateHasChanged);
+    }
+}

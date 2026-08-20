@@ -1,0 +1,196 @@
+@page "/"
+@implements IDisposable
+@using System.Globalization
+@using System.Text.RegularExpressions
+@inject WeaveEngine Engine
+
+<h1 class="visually-hidden">Dashboard</h1>
+
+<div class="page dashboard-page">
+    <header class="page-head page-head-lg dashboard-hero">
+        <div>
+            <div class="eyebrow">Control Room</div>
+            <h2><span class="title-icon">◈</span> WeaveFXP</h2>
+            <p class="page-sub">Engine status, queue pressure, recent transfer activity and quick entry points.</p>
+        </div>
+        <div class="page-actions">
+            <NavLink class="top-btn" href="browser"><span class="btn-icon">⇄</span> Browse</NavLink>
+            <NavLink class="top-btn" href="sites"><span class="btn-icon">＋</span> Add site</NavLink>
+            <NavLink class="top-btn" href="api-docs"><span class="btn-icon">⌘</span> API</NavLink>
+        </div>
+    </header>
+
+    <section class="dashboard-content">
+        <div class="dash-cards">
+            <article class="dash-card primary">
+                <div class="dash-label">Engine</div>
+                <div class="dash-value"><span class="status-dot on"></span> Running</div>
+                <div class="dash-sub">v@(Engine.Version)</div>
+            </article>
+            <article class="dash-card">
+                <div class="dash-label">Sites</div>
+                <div class="dash-value">@Sites.Count</div>
+                <div class="dash-sub">@Sites.Sum(s => s.Sections.Count) section(s)</div>
+            </article>
+            <article class="dash-card">
+                <div class="dash-label">Queue</div>
+                <div class="dash-value">@RunningJobs running</div>
+                <div class="dash-sub">@QueuedJobs queued, @FailedJobs failed</div>
+            </article>
+            <article class="dash-card">
+                <div class="dash-label">Throughput</div>
+                <div class="dash-value">@Speed(CurrentSpeed)</div>
+                <div class="dash-sub">@HumanSize(TotalMoved) moved in current jobs</div>
+            </article>
+        </div>
+
+        <section class="dashboard-grid">
+            <article class="content-panel dash-panel">
+                <div class="panel-head-row">
+                    <h3>Active Transfers</h3>
+                    <NavLink class="mini-link" href="races">Races</NavLink>
+                </div>
+                <div class="compact-list">
+                    @if (ActiveJobs.Count == 0)
+                    {
+                        <div class="empty-row compact">No active transfers.</div>
+                    }
+                    @foreach (var job in ActiveJobs.Take(8))
+                    {
+                        <div class="dash-job">
+                            <span class="badge @StateClass(job.State)">@job.State.ToString().ToLowerInvariant()</span>
+                            <strong>@Label(job)</strong>
+                            <span>@job.Request.FromSite -> @job.Request.ToSite</span>
+                            <span class="job-bar"><span class="job-bar-fill @(job.Percent < 0 ? "indet" : "")" style="width:@(job.Percent < 0 ? 100 : job.Percent)%"></span></span>
+                            <span class="mono dim">@Progress(job)</span>
+                        </div>
+                    }
+                </div>
+            </article>
+
+            <article class="content-panel dash-panel">
+                <div class="panel-head-row">
+                    <h3>Recent Log</h3>
+                    <NavLink class="mini-link" href="logs">Logs</NavLink>
+                </div>
+                <div class="compact-list">
+                    @foreach (var log in RecentLogs.Take(9))
+                    {
+                        <div class="dash-log">
+                            <span class="mono">@log.Time.ToLocalTime().ToString("HH:mm:ss")</span>
+                            <span class="pill @LevelClass(log.Level)">@log.Category</span>
+                            <span>@log.Message</span>
+                        </div>
+                    }
+                </div>
+            </article>
+        </section>
+    </section>
+</div>
+
+@code {
+    private List<Job> Jobs => Engine.Jobs();
+    private List<Site> Sites => Engine.Sites(true);
+    private List<LogEntry> RecentLogs => Engine.RecentLogs(30);
+    private List<Job> ActiveJobs => Jobs.Where(j => j.State is JobState.Running or JobState.Queued).OrderByDescending(j => j.CreatedAt).ToList();
+    private int RunningJobs => Jobs.Count(j => j.State == JobState.Running);
+    private int QueuedJobs => Jobs.Count(j => j.State == JobState.Queued);
+    private int FailedJobs => Jobs.Count(j => j.State == JobState.Failed);
+    private double CurrentSpeed
+    {
+        get
+        {
+            var jobSpeed = Jobs.Where(j => j.State == JobState.Running).Sum(JobSpeed);
+            var logSpeed = RecentRaceLogSpeed();
+            return Math.Max(jobSpeed, logSpeed);
+        }
+    }
+    private long TotalMoved => Jobs.Where(j => j.State == JobState.Running).Sum(j => j.CumulativeBytes);
+
+    protected override void OnInitialized() => Engine.Changed += OnChanged;
+    public void Dispose() => Engine.Changed -= OnChanged;
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private static string Label(Job job)
+    {
+        if (!string.IsNullOrWhiteSpace(job.Request.Label)) return job.Request.Label;
+        var path = job.Request.SourcePath.TrimEnd('/', '\\');
+        return Path.GetFileName(path.Replace('\\', '/'));
+    }
+
+    private static string Progress(Job job)
+    {
+        if (job.Percent >= 0) return $"{job.Percent}%";
+        if (job.FilesDone > 0) return $"{job.FilesDone} file(s)";
+        return "waiting";
+    }
+
+    private static double JobSpeed(Job job)
+    {
+        var live = job.SpeedBps + job.Slots.Sum(s => s.Bps);
+        if (live > 0) return live;
+
+        var recent = job.Files
+            .Where(f => f.Status == "done" && f.Bps > 0 && f.StartedAt >= DateTime.UtcNow.AddSeconds(-45))
+            .OrderByDescending(f => f.StartedAt)
+            .Take(8)
+            .ToList();
+        if (recent.Count == 0) return 0;
+        var bytes = recent.Sum(f => f.Size);
+        var seconds = recent.Sum(f => f.Seconds);
+        return seconds > 0.001 ? bytes / seconds : recent.Average(f => f.Bps);
+    }
+
+    private double RecentRaceLogSpeed()
+    {
+        var cutoff = DateTime.UtcNow.AddSeconds(-90);
+        return RecentLogs
+            .Where(l => l.Time >= cutoff)
+            .Select(l => ParseSpeed(l.Message))
+            .Where(v => v > 0)
+            .DefaultIfEmpty(0)
+            .Max();
+    }
+
+    private static double ParseSpeed(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return 0;
+        var match = Regex.Matches(message, @"(?<value>\d+(?:\.\d+)?)\s*(?<unit>[KMG]?B)/s", RegexOptions.IgnoreCase)
+            .Cast<Match>()
+            .LastOrDefault(m => m.Success);
+        if (match is null) return 0;
+        if (!double.TryParse(match.Groups["value"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+            return 0;
+        return match.Groups["unit"].Value.ToUpperInvariant() switch
+        {
+            "KB" => value * 1024,
+            "MB" => value * 1024 * 1024,
+            "GB" => value * 1024 * 1024 * 1024,
+            _ => value
+        };
+    }
+
+    private static string StateClass(JobState state) => state switch
+    {
+        JobState.Succeeded => "green",
+        JobState.Failed or JobState.Cancelled => "red",
+        JobState.Running => "busy",
+        _ => ""
+    };
+
+    private static string LevelClass(string level) => level.Equals("error", StringComparison.OrdinalIgnoreCase) ? "red"
+        : level.Equals("warn", StringComparison.OrdinalIgnoreCase) ? "amber"
+        : "green";
+
+    private static string HumanSize(long bytes)
+    {
+        if (bytes <= 0) return "0 B";
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double v = bytes;
+        var u = 0;
+        while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
+        return u == 0 ? $"{bytes} B" : $"{v.ToString(v >= 100 ? "0" : "0.0")} {units[u]}";
+    }
+
+    private static string Speed(double bps) => bps <= 0 ? "0 B/s" : $"{HumanSize((long)bps)}/s";
+}

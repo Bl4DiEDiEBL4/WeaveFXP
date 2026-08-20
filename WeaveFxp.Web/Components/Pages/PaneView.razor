@@ -1,0 +1,150 @@
+@using WeaveFxp.Web.Services
+
+<section class="pane @(Pane.Loaded ? "" : "")">
+    <div class="pane-head">
+        <select class="pane-site" value="@Pane.Site" @onchange="OnSiteChange">
+            <option value="">— site —</option>
+            @foreach (var s in Sites)
+            {
+                <option value="@s.Name">@s.Name</option>
+            }
+        </select>
+        @if (Pane.Loaded && Pane.Error is null)
+        {
+            <button class="secondary slim" title="Disconnect browse" @onclick="() => OnDisconnect.InvokeAsync()">
+                <span class="btn-icon">⏏</span>
+                Disconnect
+            </button>
+        }
+        else
+        {
+            <button class="secondary slim" title="Connect browse" @onclick="() => OnConnect.InvokeAsync()">
+                <span class="btn-icon">▶</span>
+                Connect
+            </button>
+        }
+        <span class="pane-conn-dot @(Pane.Loaded && Pane.Error is null ? "on" : "")"></span>
+    </div>
+
+    <div class="pane-nav">
+        <select class="pane-section" @onchange="OnSectionChange">
+            <option value="">Section</option>
+            @foreach (var sec in SectionsFor())
+            {
+                <option value="@sec.Section">@sec.Name</option>
+            }
+        </select>
+        <button class="secondary icon-btn" title="Parent directory" @onclick="() => OnUp.InvokeAsync()">⇧</button>
+        <input class="pane-path" value="@Pane.Path" @onchange="OnPathChange" spellcheck="false" />
+        <button class="secondary icon-btn" title="Go" @onclick="() => OnGo.InvokeAsync()">➜</button>
+        <button class="secondary icon-btn" title="Refresh" @onclick="() => OnGo.InvokeAsync()">↻</button>
+        <button class="secondary slim" title="SFV / completion check" @onclick="() => OnSfv.InvokeAsync()">
+            <span class="btn-icon">✓</span>
+            SFV
+        </button>
+        <button class="secondary slim" title="Download selected locally" @onclick="() => OnDownload.InvokeAsync()">
+            <span class="btn-icon">⇩</span>
+            DL
+        </button>
+    </div>
+
+    <div class="pane-body"
+         @oncontextmenu="e => OnContext.InvokeAsync((-1, e))"
+         @oncontextmenu:preventDefault="true">
+        <table class="listing">
+            <thead>
+                <tr>
+                    <th class="col-name"><button class="sort-head" @onclick='() => OnSort.InvokeAsync("name")'>Name @SortMark("name")</button></th>
+                    <th class="col-size"><button class="sort-head" @onclick='() => OnSort.InvokeAsync("size")'>Size @SortMark("size")</button></th>
+                    <th class="col-date"><button class="sort-head" @onclick='() => OnSort.InvokeAsync("modified")'>Modified @SortMark("modified")</button></th>
+                </tr>
+            </thead>
+            <tbody>
+                @if (Pane.Path != "/")
+                {
+                    <tr class="updir" @ondblclick="() => OnUp.InvokeAsync()"
+                        @oncontextmenu="e => OnContext.InvokeAsync((-1, e))"
+                        @oncontextmenu:preventDefault="true"
+                        @oncontextmenu:stopPropagation="true">
+                        <td class="col-name"><span class="icon">📁</span> ..</td><td class="col-size"></td><td class="col-date"></td>
+                    </tr>
+                }
+                @for (var i = 0; i < Pane.Entries.Count; i++)
+                {
+                    var index = i;
+                    var entry = Pane.Entries[i];
+                    <tr class="entry @(entry.Type == "dir" ? "is-dir" : "") @(Pane.Selected.Contains(index) ? "selected" : "")"
+                        @onclick="e => OnSelect.InvokeAsync((index, e))"
+                        @ondblclick="() => OnOpen.InvokeAsync(index)"
+                        @oncontextmenu="e => OnContext.InvokeAsync((index, e))"
+                        @oncontextmenu:preventDefault="true"
+                        @oncontextmenu:stopPropagation="true">
+                        <td class="col-name"><span class="icon">@Icon(entry.Type)</span> @entry.Name</td>
+                        <td class="col-size">@(entry.Type == "dir" ? "" : HumanSize(entry.Size))</td>
+                        <td class="col-date">@(entry.Modified.Year > 1 ? entry.Modified.ToLocalTime().ToString("g") : "")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        @if (!Pane.Loaded && Pane.Error is null)
+        {
+            <div class="pane-overlay">Pick a site and press Connect</div>
+        }
+        else if (Pane.Error is not null)
+        {
+            <div class="pane-overlay">Error: @Pane.Error</div>
+        }
+        else if (Pane.Loading)
+        {
+            <div class="pane-overlay busy">Listing @Pane.Path …</div>
+        }
+    </div>
+
+    <div class="pane-status">@Pane.Status</div>
+</section>
+
+@code {
+    [Parameter] public PaneModel Pane { get; set; } = new();
+    [Parameter] public List<Site> Sites { get; set; } = new();
+    [Parameter] public EventCallback<string> OnSiteSelected { get; set; }
+    [Parameter] public EventCallback<string> OnSectionSelected { get; set; }
+    [Parameter] public EventCallback<string> OnPathChanged { get; set; }
+    [Parameter] public EventCallback OnConnect { get; set; }
+    [Parameter] public EventCallback OnDisconnect { get; set; }
+    [Parameter] public EventCallback OnUp { get; set; }
+    [Parameter] public EventCallback OnGo { get; set; }
+    [Parameter] public EventCallback OnSfv { get; set; }
+    [Parameter] public EventCallback OnDownload { get; set; }
+    [Parameter] public EventCallback<int> OnOpen { get; set; }
+    [Parameter] public EventCallback<(int, MouseEventArgs)> OnSelect { get; set; }
+    [Parameter] public EventCallback<string> OnSort { get; set; }
+    [Parameter] public EventCallback<(int, MouseEventArgs)> OnContext { get; set; }
+
+    private Task OnSiteChange(ChangeEventArgs e) => OnSiteSelected.InvokeAsync(e.Value?.ToString() ?? "");
+    private Task OnSectionChange(ChangeEventArgs e) => OnSectionSelected.InvokeAsync(e.Value?.ToString() ?? "");
+    private Task OnPathChange(ChangeEventArgs e) => OnPathChanged.InvokeAsync(e.Value?.ToString() ?? "/");
+
+    private IEnumerable<SiteSection> SectionsFor()
+    {
+        var site = Sites.FirstOrDefault(s => s.Name == Pane.Site);
+        return site?.Sections ?? Enumerable.Empty<SiteSection>();
+    }
+
+    private static string Icon(string type) => type switch { "dir" => "📁", "link" => "🔗", _ => "📄" };
+
+    private string SortMark(string column)
+    {
+        if (!Pane.SortColumn.Equals(column, StringComparison.OrdinalIgnoreCase)) return "";
+        return Pane.SortDesc ? "▼" : "▲";
+    }
+
+    private static string HumanSize(long bytes)
+    {
+        if (bytes <= 0) return "";
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double v = bytes;
+        var u = 0;
+        while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
+        return u == 0 ? $"{bytes} B" : $"{v.ToString(v >= 100 ? "0" : "0.0")} {units[u]}";
+    }
+}

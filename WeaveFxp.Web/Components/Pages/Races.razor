@@ -1,0 +1,405 @@
+@page "/races"
+@implements IDisposable
+@inject WeaveEngine Engine
+
+<h1 class="visually-hidden">Races</h1>
+
+<div class="page races-page">
+    <header class="page-head page-head-lg">
+        <div>
+            <div class="eyebrow">Racing</div>
+            <h2><span class="title-icon">⚑</span> Races</h2>
+            <p class="page-sub">@Active.Count running · @Filtered.Count race(s) total. The browser queue only shows manual transfers.</p>
+        </div>
+        <div class="page-actions">
+            <button class="secondary" @onclick="Refresh"><span class="btn-icon">↻</span> Refresh</button>
+        </div>
+    </header>
+
+    <section class="content-panel">
+        <div class="toolbar">
+            <input placeholder="Search release, site, path..." @bind="_query" @bind:event="oninput" />
+            <select @bind="_state">
+                <option value="">All states</option>
+                @foreach (var s in Enum.GetValues<JobState>())
+                {
+                    <option value="@s">@s</option>
+                }
+            </select>
+            <span class="spacer"></span>
+            <span class="hint">@Filtered.Count race(s)</span>
+        </div>
+
+        <div class="table-wrap">
+            <table class="data-table races-table">
+                <colgroup>
+                    <col style="width:80px" />
+                    <col style="width:104px" />
+                    <col style="width:460px" />
+                    <col style="width:118px" />
+                    <col style="width:130px" />
+                    <col />
+                    <col style="width:190px" />
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th class="col-time">Started</th>
+                        <th class="col-state">State</th>
+                        <th class="col-release">Release</th>
+                        <th class="col-route">Route</th>
+                        <th class="col-section">Section</th>
+                        <th class="col-progress">Progress</th>
+                        <th class="col-actions"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (Filtered.Count == 0)
+                    {
+                        <tr><td colspan="7" class="dim">No races yet. Start one from the browser (race spread) or over the API.</td></tr>
+                    }
+                    @foreach (var job in Filtered.Take(200))
+                    {
+                        <tr class="race-row @(IsOpen(job) ? "open" : "")" @onclick="() => ToggleLog(job)">
+                            <td class="mono col-time">@job.CreatedAt.ToLocalTime().ToString("HH:mm:ss")</td>
+                            <td class="col-state">
+                                <span class="pill @StateClass(job.State)" title="@job.Error">@job.State</span>
+                                @if (job.Paused)
+                                {
+                                    <span class="pill amber">paused</span>
+                                }
+                            </td>
+                            <td class="strong race-name" title="@job.Request.SourcePath → @job.Request.DestPath">@RaceName(job)</td>
+                            <td>@job.Request.FromSite → @job.Request.ToSite</td>
+                            <td class="mono race-section" title="@job.Request.SourcePath → @job.Request.DestPath">@RaceSections(job)</td>
+                            <td class="col-progress">
+                                @if (job.State == JobState.Running)
+                                {
+                                    <span class="job-prog wide">
+                                        <span class="job-bar">
+                                            <span class="job-bar-fill @(job.Percent < 0 ? "indet" : "")"
+                                                  style="width:@(job.Percent < 0 ? 100 : job.Percent)%"></span>
+                                        </span>
+                                        <span class="job-prog-text">@ProgressText(job)</span>
+                                    </span>
+                                }
+                                else if (job.FilesDone > 0 || job.CumulativeBytes > 0)
+                                {
+                                    <span class="job-prog wide">
+                                        <span class="job-bar">
+                                            <span class="job-bar-fill" style="width:@(job.Percent < 0 ? 100 : job.Percent)%"></span>
+                                        </span>
+                                        <span class="job-prog-text">@job.FilesDone/@Math.Max(job.FilesTotal, job.FilesDone) files · @HumanSize(job.CumulativeBytes) raced</span>
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="dim">—</span>
+                                }
+                            </td>
+                            <td class="col-actions" @onclick:stopPropagation="true">
+                                @if (job.State is JobState.Queued or JobState.Running)
+                                {
+                                    @if (job.Paused)
+                                    {
+                                        <button class="secondary slim" @onclick="() => Resume(job)">Resume</button>
+                                    }
+                                    else
+                                    {
+                                        <button class="secondary slim" @onclick="() => Pause(job)">Pause</button>
+                                    }
+                                    <button class="secondary slim danger" @onclick="() => Stop(job)">Stop</button>
+                                }
+                                else
+                                {
+                                    <button class="secondary slim" @onclick="() => Retry(job)">Retry</button>
+                                    <button class="secondary slim danger" @onclick="() => Remove(job)">Remove</button>
+                                }
+                            </td>
+                        </tr>
+                        @if (IsOpen(job))
+                        {
+                            <tr class="race-log-row">
+                                <td colspan="7">
+                                    @if (job.Files.Count > 0)
+                                    {
+                                        <table class="data-table file-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Started</th>
+                                                    <th>Use</th>
+                                                    <th>Route</th>
+                                                    <th>Path</th>
+                                                    <th>Transferred</th>
+                                                    <th>File</th>
+                                                    <th>Left</th>
+                                                    <th>Speed</th>
+                                                    <th>Done</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                @foreach (var ft in FilesNewestFirst(job))
+                                                {
+                                                    <tr>
+                                                        <td class="mono">@ft.StartedAt.ToLocalTime().ToString("HH:mm:ss")</td>
+                                                        <td class="mono">@Elapsed(ft)</td>
+                                                        <td class="mono route-cell">@job.Request.FromSite → @job.Request.ToSite</td>
+                                                        <td class="mono path-cell" title="@TransferPath(job, ft)">@TransferPath(job, ft)</td>
+                                                        <td class="mono transferred-cell">@Transferred(ft)</td>
+                                                        <td class="mono file-name" title="@FileTitle(ft)">@ft.Name</td>
+                                                        <td class="mono">@Left(ft)</td>
+                                                        <td class="mono">@FileSpeed(ft)</td>
+                                                        <td><span class="pill @FileStatusClass(ft.Status)">@Done(ft)</span></td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    }
+                                    <details class="race-raw-log">
+                                        <summary>Raw log (last @Math.Min(job.Events.Count, 200) of @job.Events.Count lines)</summary>
+                                        <ul class="events">
+                                            @foreach (var ev in job.Events.TakeLast(200))
+                                            {
+                                                <li class="lvl-@ev.Level">[@ev.Time.ToLocalTime().ToString("HH:mm:ss")] @ev.Level: @ev.Message</li>
+                                            }
+                                        </ul>
+                                    </details>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+
+@if (_toast is not null)
+{
+    <div class="toast show" @key="_toast">@_toast</div>
+}
+
+@code {
+    private List<Job> _jobs = new();
+    private List<Site> _sites = new();
+    // path (e.g. "/!Today_FLAC") on a given site -> its configured section NAME.
+    private readonly Dictionary<string, string> _sectionNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _open = new(StringComparer.OrdinalIgnoreCase);
+    private string _query = "";
+    private string _state = "";
+    private string? _toast;
+
+    protected override void OnInitialized()
+    {
+        _sites = Engine.Sites(true);
+        BuildSectionMap();
+        Refresh();
+        Engine.Changed += OnChanged;
+    }
+
+    private void BuildSectionMap()
+    {
+        _sectionNames.Clear();
+        foreach (var site in _sites)
+            foreach (var sec in site.Sections)
+            {
+                var path = NormalizeSectionPath(sec.Section);
+                if (path.Length == 0 || string.IsNullOrWhiteSpace(sec.Name)) continue;
+                _sectionNames[site.Name + "|" + path] = sec.Name;
+            }
+    }
+
+    private static string NormalizeSectionPath(string p)
+    {
+        p = (p ?? "").Trim();
+        if (p.Length > 1) p = p.TrimEnd('/');
+        return p;
+    }
+
+    public void Dispose() => Engine.Changed -= OnChanged;
+
+    private void OnChanged() => _ = InvokeAsync(() => { Refresh(); StateHasChanged(); });
+
+    private void Refresh() => _jobs = Engine.Jobs();
+
+    private List<Job> Filtered
+    {
+        get
+        {
+            IEnumerable<Job> q = _jobs.Where(j => j.Type == JobType.Race);
+            if (!string.IsNullOrWhiteSpace(_state) && Enum.TryParse<JobState>(_state, out var st))
+                q = q.Where(j => j.State == st);
+            if (!string.IsNullOrWhiteSpace(_query))
+            {
+                var needle = _query.Trim();
+                q = q.Where(j =>
+                    j.Request.SourcePath.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
+                    j.Request.DestPath.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
+                    j.Request.FromSite.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
+                    j.Request.ToSite.Contains(needle, StringComparison.OrdinalIgnoreCase));
+            }
+            return q.ToList();
+        }
+    }
+
+    private List<Job> Active => _jobs.Where(j => j.Type == JobType.Race && j.State is JobState.Queued or JobState.Running).ToList();
+
+    private bool IsOpen(Job job) => _open.Contains(job.Id);
+
+    private void ToggleLog(Job job)
+    {
+        if (!_open.Add(job.Id)) _open.Remove(job.Id);
+    }
+
+    private static List<FileTransfer> FilesNewestFirst(Job job) =>
+        job.Files.OrderByDescending(f => f.StartedAt).Take(150).ToList();
+
+    private static string Elapsed(FileTransfer ft)
+    {
+        var secs = ft.Status == "active" ? (DateTime.UtcNow - ft.StartedAt).TotalSeconds : ft.Seconds;
+        if (secs <= 0) return "—";
+        return secs < 10 ? $"{secs:0.0}s" : $"{secs:0}s";
+    }
+
+    private static string FileSpeed(FileTransfer ft)
+    {
+        if (ft.Status == "active")
+        {
+            // Live estimate while the file is in flight: size over elapsed so far.
+            var secs = (DateTime.UtcNow - ft.StartedAt).TotalSeconds;
+            return ft.Size > 0 && secs > 0.3 ? "≤" + Speed(ft.Size / secs) : "…";
+        }
+        return ft.Bps > 0 ? Speed(ft.Bps) : "—";
+    }
+
+    private static string FileTitle(FileTransfer ft) =>
+        string.IsNullOrWhiteSpace(ft.Error) ? ft.Name : $"{ft.Name} - {ft.Error}";
+
+    private static string TransferPath(Job job, FileTransfer ft)
+    {
+        var source = JoinRemote(ParentPath(job.Request.SourcePath), ParentPath(ft.Name));
+        var dest = JoinRemote(ParentPath(job.Request.DestPath), ParentPath(ft.Name));
+        return source.Equals(dest, StringComparison.OrdinalIgnoreCase) ? source : $"{source} → {dest}";
+    }
+
+    private static string Transferred(FileTransfer ft) =>
+        ft.Status == "done"
+            ? $"{HumanSize(ft.Size)} / {HumanSize(ft.Size)}"
+            : $"— / {HumanSize(ft.Size)}";
+
+    private static string Left(FileTransfer ft) => ft.Status == "active" ? "…" : "—";
+
+    private static string Done(FileTransfer ft) => ft.Status switch
+    {
+        "done" => "done",
+        "fail" => "fail",
+        "active" => "active",
+        "dupe" => "dupe",
+        _ => ft.Status
+    };
+
+    private static string FileStatusClass(string status) => status switch
+    {
+        "done" => "green",
+        "fail" => "red",
+        "active" => "cyan",
+        _ => "amber", // dupe / wait
+    };
+
+    private static string RaceName(Job job)
+    {
+        var p = (job.Request.SourcePath ?? "").TrimEnd('/');
+        var i = p.LastIndexOf('/');
+        var name = i >= 0 ? p[(i + 1)..] : p;
+        return string.IsNullOrWhiteSpace(name) ? job.Request.SourcePath ?? "" : name;
+    }
+
+    // Show the site's configured section NAME (e.g. "FLAC"), not the raw path.
+    // Falls back to the path when the section isn't configured on the site.
+    private string RaceSections(Job job)
+    {
+        var src = SectionNameFor(job.Request.FromSite, ParentPath(job.Request.SourcePath));
+        var dst = SectionNameFor(job.Request.ToSite, ParentPath(job.Request.DestPath));
+        return src.Equals(dst, StringComparison.OrdinalIgnoreCase) ? src : $"{src} → {dst}";
+    }
+
+    private string SectionNameFor(string site, string path)
+    {
+        var key = site + "|" + NormalizeSectionPath(path);
+        return _sectionNames.TryGetValue(key, out var name) ? name : NormalizeSectionPath(path);
+    }
+
+    private static string ParentPath(string path)
+    {
+        path = (path ?? "").TrimEnd('/');
+        if (path.Length == 0) return "/";
+        var i = path.LastIndexOf('/');
+        if (i <= 0) return "/";
+        return path[..i];
+    }
+
+    private static string JoinRemote(string left, string right)
+    {
+        left = string.IsNullOrWhiteSpace(left) ? "/" : left.TrimEnd('/');
+        right = (right ?? "").Trim('/');
+        if (right.Length == 0) return left.Length == 0 ? "/" : left;
+        return left == "/" ? "/" + right : left + "/" + right;
+    }
+
+    private void Pause(Job job) { if (!Engine.PauseJob(job.Id)) Toast($"Cannot pause {job.Id}"); }
+    private void Resume(Job job) { if (!Engine.ResumeJob(job.Id)) Toast($"Cannot resume {job.Id}"); }
+    private void Stop(Job job) { if (!Engine.CancelJob(job.Id, "Stopped by user")) Toast($"Cannot stop {job.Id}"); }
+    private void Retry(Job job) { if (!Engine.RetryJob(job.Id)) Toast($"Cannot retry {job.Id}"); }
+    private void Remove(Job job) { if (!Engine.RemoveJob(job.Id)) Toast($"Cannot remove {job.Id}"); }
+
+    private void Toast(string message)
+    {
+        _toast = message;
+        _ = HideToastLater();
+    }
+
+    private async Task HideToastLater()
+    {
+        await Task.Delay(2600);
+        _toast = null;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private static string StateClass(JobState s) => s switch
+    {
+        JobState.Succeeded => "green",
+        JobState.Failed => "red",
+        JobState.Running => "cyan",
+        _ => "amber",
+    };
+
+    private static string HumanSize(long bytes)
+    {
+        if (bytes <= 0) return "0 B";
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double v = bytes;
+        var u = 0;
+        while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
+        return u == 0 ? $"{bytes} B" : $"{v.ToString(v >= 100 ? "0" : "0.0")} {units[u]}";
+    }
+
+    private static string Speed(double bps)
+    {
+        if (bps <= 0) return "";
+        string[] units = { "B/s", "KB/s", "MB/s", "GB/s" };
+        var v = bps;
+        var u = 0;
+        while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
+        return $"{v.ToString(v >= 100 ? "0" : "0.0")} {units[u]}";
+    }
+
+    private static string ProgressText(Job job)
+    {
+        // Progress is the wide fill column — show the current file too. The cell is
+        // single-line + ellipsis, so a very long name just truncates cleanly.
+        var count = job.FilesTotal > 0 ? $"{job.FilesDone}/{job.FilesTotal} files" : $"{job.FilesDone} files";
+        var bytes = job.CumulativeBytes > 0 ? $" · {HumanSize(job.CumulativeBytes)}" : "";
+        var speed = job.SpeedBps > 0 ? $" · {Speed(job.SpeedBps)}" : "";
+        var cur = string.IsNullOrEmpty(job.CurrentFile) ? "" : $" · {job.CurrentFile}";
+        return $"{count}{bytes}{speed}{cur}";
+    }
+}

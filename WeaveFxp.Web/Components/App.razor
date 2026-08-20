@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WeaveFXP</title>
+    <base href="/" />
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
+    <link rel="stylesheet" href="app.css?v=responsive" />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+<body>
+    @* Global interactivity: the whole tree runs over the SignalR circuit so every
+       @@onclick is wired up, including inside the layout. *@
+    <Routes @rendermode="InteractiveServer" />
+    <script>
+        window.weaveFxp = window.weaveFxp || {};
+        window.weaveFxp.startSplitDrag = function (root, dotnet, tabId, startX) {
+            const browsers = root && root.querySelector ? root.querySelector(".browsers") : null;
+            if (!browsers) return;
+
+            let lastPct = null;
+            let frame = 0;
+            const setPct = (clientX) => {
+                const rect = browsers.getBoundingClientRect();
+                if (!rect.width) return;
+                const pct = Math.max(28, Math.min(72, ((clientX - rect.left) / rect.width) * 100));
+                const rounded = Math.round(pct);
+                root.style.setProperty("--split-left", rounded + "%");
+                lastPct = rounded;
+                if (!frame) {
+                    frame = requestAnimationFrame(() => {
+                        frame = 0;
+                        if (lastPct !== null) dotnet.invokeMethodAsync("SetSplitPctFromJs", tabId, lastPct).catch(() => {});
+                    });
+                }
+            };
+
+            const move = (event) => {
+                event.preventDefault();
+                setPct(event.clientX);
+            };
+            const up = (event) => {
+                setPct(event.clientX);
+                document.removeEventListener("pointermove", move);
+                document.removeEventListener("pointerup", up);
+                document.removeEventListener("pointercancel", up);
+            };
+
+            setPct(startX);
+            document.addEventListener("pointermove", move, { passive: false });
+            document.addEventListener("pointerup", up, { once: true });
+            document.addEventListener("pointercancel", up, { once: true });
+        };
+    </script>
+    <script src="_framework/blazor.web.js"></script>
+</body>
+</html>
