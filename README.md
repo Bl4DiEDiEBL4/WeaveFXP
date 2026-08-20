@@ -11,6 +11,8 @@ engine runs in the same process.
 
 <img width="2552" height="1274" alt="image" src="https://github.com/user-attachments/assets/40e7a846-3320-4c74-bc23-4db16cb6ebd9" />
 
+<img width="2552" height="1274" alt="image" src="https://github.com/user-attachments/assets/23256831-e918-4b93-9131-5abb248e8bed" />
+
 ## Download And Start
 
 Choose the release for your machine:
