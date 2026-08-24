@@ -14,7 +14,9 @@ OUT="$ROOT/Release"
 ZIPOUT="$OUT/zips"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/weavefxp-publish.XXXXXX")"
 PROJ="$ROOT/WeaveFxp.Web/WeaveFxp.Web.csproj"
-VERSION="1.0.0"
+VERSION="1.0.1"
+LEGACY_DATA="$OUT/data"
+LEGACY_DATA_SEED="$WORK/legacy-data"
 
 cleanup() {
     rm -rf "$WORK"
@@ -32,12 +34,21 @@ if command -v python3 >/dev/null 2>&1; then
 import sys
 import xml.etree.ElementTree as ET
 root = ET.parse(sys.argv[1]).getroot()
-print(root.findtext("./PropertyGroup/Version") or "1.0.0")
+print(root.findtext("./PropertyGroup/Version") or "1.0.1")
 PY
 )"
 fi
 
 mkdir -p "$OUT" "$ZIPOUT"
+
+# Older builds stored data directly in Release/data while the single-exe runtime
+# stores it next to the executable in Release/<runtime>/data. Preserve that legacy
+# folder as a seed so publishing never makes an existing setup look empty.
+if [ -d "$LEGACY_DATA" ]; then
+    rm -rf "$LEGACY_DATA_SEED"
+    cp -a "$LEGACY_DATA" "$LEGACY_DATA_SEED"
+fi
+
 find "$OUT" -maxdepth 1 -type f -delete
 
 RIDS=("$@")
@@ -56,6 +67,8 @@ for RID in "${RIDS[@]}"; do
     rm -rf "$PRESERVE_DATA"
     if [ -d "$OUT/$RID/data" ]; then
         mv "$OUT/$RID/data" "$PRESERVE_DATA"
+    elif [ -d "$LEGACY_DATA_SEED" ]; then
+        cp -a "$LEGACY_DATA_SEED" "$PRESERVE_DATA"
     fi
 
     rm -rf "$OUT/$RID"
@@ -110,3 +123,4 @@ ls -lh "$OUT"/*/WeaveFXP* "$ZIPOUT"/WeaveFXP-v"$VERSION"-*.zip 2>/dev/null || tr
 echo
 echo "  Ship only the per-platform zip."
 echo "  data/ is created on first run next to the executable."
+echo "  Legacy Release/data is copied into runtime folders when no runtime data exists yet."

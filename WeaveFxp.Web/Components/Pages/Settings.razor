@@ -27,7 +27,7 @@
                 <tbody>
                     <tr><td>Listening on</td><td>@_form.WebBindAddress:@_form.WebPort</td></tr>
                     <tr><td>Reachable from</td><td><span class="pill @(_form.WebBindAddress is "127.0.0.1" or "localhost" ? "on" : "busy")">@ReachLabel()</span></td></tr>
-                    <tr><td>Version</td><td>v1.0.0</td></tr>
+                    <tr><td>Version</td><td>v@(Engine.Version)</td></tr>
                 </tbody>
             </table>
             <p class="hint">Web bind/port changes are read at startup, so save and restart the exe after changing them.</p>
@@ -37,12 +37,14 @@
             <div class="card-title">ENGINE</div>
             <label class="opt"><input type="checkbox" @bind="_form.DebugLogging" /> <span><span class="opt-name">Debug logging</span><span class="fh">Verbose diagnostics for troubleshooting.</span></span></label>
             <label class="opt"><input type="checkbox" @bind="_form.UseActiveModeAddress" /> <span><span class="opt-name">Active address</span><span class="fh">Use the configured active-mode IP when needed.</span></span></label>
+            <label class="compact-field">Hot JSON jobs<input type="number" min="25" max="150" @bind="_form.StoredJobHistoryLimit" /></label>
+            <p class="hint">Older completed jobs are moved to the SQLite history archive.</p>
         </article>
 
         <article class="card">
             <div class="card-title">UPDATES</div>
             <label class="opt"><input type="checkbox" @bind="_form.CheckForUpdates" /> <span><span class="opt-name">Check for updates</span><span class="fh">Shows update status later; no popup and no automatic install.</span></span></label>
-            <table class="info-table tight"><tbody><tr><td>Current version</td><td>v1.0.0</td></tr></tbody></table>
+            <table class="info-table tight"><tbody><tr><td>Current version</td><td>v@(Engine.Version)</td></tr></tbody></table>
         </article>
 
         <article class="card">
@@ -183,13 +185,15 @@
                         <div class="form-grid">
                             <label>Max FXP jobs<input type="number" @bind="_form.MaxConcurrentFxpJobs" /></label>
                             <label>Max race jobs<input type="number" @bind="_form.MaxConcurrentRaceJobs" /></label>
+                            <label>Local download slots<input type="number" min="1" max="64" @bind="_form.LocalDownloadSlots" /></label>
+                            <label>Local upload slots<input type="number" min="1" max="64" @bind="_form.LocalUploadSlots" /></label>
                         </div>
                     </section>
 
                     <section class="panel-card">
                         <h3>Racing</h3>
                         <div class="form-grid">
-                            <label>Poll interval (ms)<input type="number" min="100" max="30000" @bind="_form.RacePollIntervalMs" /></label>
+                            <label>Poll interval (ms)<input type="number" min="25" max="30000" @bind="_form.RacePollIntervalMs" /></label>
                             <label>Stop after idle cycles<input type="number" min="1" @bind="_form.RaceMaxIdleCycles" /></label>
                         </div>
                         <p class="fh">A race re-lists the source every poll interval and moves new files as they land. It stops when the release is complete, or after this many polls with no new files.</p>
@@ -197,12 +201,27 @@
                             <label><input type="checkbox" @bind="_form.FtpDebugLog" /> Debug: also log FTP protocol for API-triggered races</label>
                         </div>
                         <p class="fh">Manual browsing, transfers and downloads always write to the FTP Log. Races started over the API run silent so logging does not cost throughput; tick this only when debugging one.</p>
+                        <label class="opt"><input type="checkbox" @bind="_form.RaceDestinationPrecheck" /> <span><span class="opt-name">Destination precheck</span><span class="fh">Poll the target during a race to skip files already appearing there. Leave off for fastest racing; X-DUPE still learns server dupes.</span></span></label>
+                    </section>
+
+                    <section class="panel-card">
+                        <h3>TCP tuning</h3>
+                        <div class="form-grid">
+                            <label>Send buffer (KB)<input type="number" min="0" max="16384" @bind="_form.TcpSendBufferKBytes" /></label>
+                            <label>Receive buffer (KB)<input type="number" min="0" max="16384" @bind="_form.TcpReceiveBufferKBytes" /></label>
+                        </div>
+                        <p class="fh">0 lets the OS decide. Larger buffers can help fast LAN/download/upload paths.</p>
                     </section>
 
                     <section class="panel-card">
                         <h3>Local</h3>
                         <div class="form-grid">
-                            <label class="wide">Download folder<input @bind="_form.DownloadDir" placeholder="downloads" /></label>
+                            <label class="wide">Download folder
+                                <span class="input-action">
+                                    <input @bind="_form.DownloadDir" placeholder="downloads" />
+                                    <button type="button" class="secondary slim" @onclick="OpenFolderPicker">Browse</button>
+                                </span>
+                            </label>
                         </div>
                     </section>
 
@@ -340,7 +359,12 @@
                         <h3>UDP API</h3>
                         <div class="form-grid">
                             <label>UDP API port<input type="number" @bind="_form.UdpApiPort" /></label>
-                            <label>UDP mode<input @bind="_form.UdpApiMode" /></label>
+                            <label>UDP mode
+                                <select @bind="_form.UdpApiMode">
+                                    <option value="plaintext">Plain text</option>
+                                    <option value="json">JSON</option>
+                                </select>
+                            </label>
                             <div class="checks wide">
                                 <label><input type="checkbox" @bind="_form.EnableUdpApi" /> UDP API</label>
                             </div>
@@ -357,6 +381,47 @@
     </section>
 </div>
 
+@if (_folderPickerOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseFolderPicker"></div>
+    <section class="modal folder-picker-modal">
+        <header>
+            <div>
+                <h3>Pick Download Folder</h3>
+                <div class="viewer-meta">@(_folderPath.Length == 0 ? "Drives" : _folderPath)</div>
+            </div>
+            <button class="secondary icon-btn" title="Close" @onclick="CloseFolderPicker">×</button>
+        </header>
+        <div class="folder-picker-actions">
+            <select value="@_folderPath" @onchange="FolderRootChanged">
+                <option value="">@(OperatingSystem.IsWindows() ? "Drives" : "/")</option>
+                @foreach (var root in LocalRoots())
+                {
+                    <option value="@root">@root</option>
+                }
+            </select>
+            <button class="secondary slim" @onclick="FolderUp">⇧ Up</button>
+            <button class="secondary slim" @onclick="UseFolder">Use this folder</button>
+        </div>
+        <div class="folder-list">
+            @if (_folderPath.Length == 0 && OperatingSystem.IsWindows())
+            {
+                @foreach (var root in LocalRoots())
+                {
+                    <button type="button" @onclick="() => OpenFolder(root)">▣ @root</button>
+                }
+            }
+            else
+            {
+                @foreach (var dir in FolderDirs())
+                {
+                    <button type="button" @onclick="() => OpenFolder(dir)">▣ @Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))</button>
+                }
+            }
+        </div>
+    </section>
+}
+
 @if (_toast is not null)
 {
     <div class="toast show" @key="_toast">@_toast</div>
@@ -369,6 +434,8 @@
     private string _tab = "web";
     private string _apiPassword = "";
     private string _siteOrderCandidate = "";
+    private bool _folderPickerOpen;
+    private string _folderPath = "";
     private string? _toast;
 
     protected override void OnInitialized()
@@ -398,6 +465,68 @@
     private string TabClass(string tab) => $"editor-tab {(_tab == tab ? "active" : "")}";
     private string ReachLabel() => _form.WebBindAddress is "127.0.0.1" or "localhost" ? "This machine only" : "Other machines";
     private string TrayStatus() => TrayService.StatusText;
+
+    private void OpenFolderPicker()
+    {
+        _folderPath = ResolveDownloadFolderForPicker();
+        _folderPickerOpen = true;
+    }
+
+    private void CloseFolderPicker() => _folderPickerOpen = false;
+
+    private void UseFolder()
+    {
+        if (string.IsNullOrWhiteSpace(_folderPath))
+        {
+            Toast("Pick a folder first");
+            return;
+        }
+        _form.DownloadDir = _folderPath;
+        _folderPickerOpen = false;
+    }
+
+    private void FolderRootChanged(ChangeEventArgs e) => _folderPath = e.Value?.ToString() ?? "";
+
+    private void OpenFolder(string path) => _folderPath = path;
+
+    private void FolderUp()
+    {
+        if (OperatingSystem.IsWindows() && string.IsNullOrWhiteSpace(_folderPath)) return;
+        var root = Path.GetPathRoot(_folderPath);
+        if (OperatingSystem.IsWindows() && _folderPath.Equals(root, StringComparison.OrdinalIgnoreCase))
+        {
+            _folderPath = "";
+            return;
+        }
+        _folderPath = Directory.GetParent(_folderPath)?.FullName ?? root ?? _folderPath;
+    }
+
+    private string ResolveDownloadFolderForPicker()
+    {
+        var dir = (_form.DownloadDir ?? "").Trim();
+        if (dir.Length == 0) return OperatingSystem.IsWindows() ? "" : "/";
+        if (!Path.IsPathRooted(dir)) dir = Path.Combine(AppContext.BaseDirectory, dir);
+        return Directory.Exists(dir) ? Path.GetFullPath(dir) : (OperatingSystem.IsWindows() ? "" : "/");
+    }
+
+    private static IReadOnlyList<string> LocalRoots()
+    {
+        if (OperatingSystem.IsWindows())
+            return DriveInfo.GetDrives()
+                .Where(d => d.IsReady || d.DriveType is DriveType.Fixed or DriveType.Removable or DriveType.Network)
+                .Select(d => d.RootDirectory.FullName)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        return new[] { "/" };
+    }
+
+    private IEnumerable<string> FolderDirs()
+    {
+        if (string.IsNullOrWhiteSpace(_folderPath)) return Enumerable.Empty<string>();
+        try { return Directory.EnumerateDirectories(_folderPath).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(); }
+        catch { return Enumerable.Empty<string>(); }
+    }
 
     private void AddGlobalSkipPattern() => _form.GlobalSkiplist.Add("");
 
@@ -473,6 +602,7 @@
     {
         yield return ("logs", Engine.RecentLogs(3000).Count);
         yield return ("jobs", Engine.Jobs().Count);
+        yield return ("archived jobs", Engine.ArchivedJobCount());
         yield return ("release checks", Engine.Releases().Count);
         yield return ("dupes", Engine.DupeCount());
     }

@@ -177,25 +177,57 @@
                         </section>
 
                         <section class="panel-card">
-                            <h3>Racing direction</h3>
+                            <h3>Race routing</h3>
                             <div class="checks cards-checks">
-                                <label><input type="checkbox" @bind="_form.BlockTransferTo" /> Block transfer TO this site</label>
-                                <label><input type="checkbox" @bind="_form.BlockTransferFrom" /> Block transfer FROM this site</label>
+                                <label><input type="checkbox" @bind="_form.BlockTransferTo" /> Never use this site as destination</label>
+                                <label><input type="checkbox" @bind="_form.BlockTransferFrom" /> Never use this site as source</label>
                             </div>
-                            <p class="hint">Race spreads run in every direction between the selected sites (1 → 2 and 2 → 1). These blocks take a site out of the mesh as destination or source.</p>
+                            <p class="hint">A spread can race both ways between selected sites. Use these switches to remove this site completely from one side of the route.</p>
+
+                            @if (OtherSiteNames().Any())
+                            {
+                                <div class="panel-grid">
+                                    <div>
+                                        <h3>Block transfers from this site to</h3>
+                                        <p class="hint">Checked sites will not receive race files from @_form.Name.</p>
+                                        <div class="checks cards-checks">
+                                            @foreach (var other in OtherSiteNames())
+                                            {
+                                                <label><input type="checkbox"
+                                                    checked="@IsTargetBlocked(other)"
+                                                    @onchange="e => SetTargetBlocked(other, e)" /> @other</label>
+                                            }
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <h3>Block transfers to this site from</h3>
+                                        <p class="hint">Checked sites may not send race files to @_form.Name.</p>
+                                        <div class="checks cards-checks">
+                                            @foreach (var other in OtherSiteNames())
+                                            {
+                                                <label><input type="checkbox"
+                                                    checked="@IsSourceBlocked(other)"
+                                                    @onchange="e => SetSourceBlocked(other, e)" /> @other</label>
+                                            }
+                                        </div>
+                                    </div>
+                                </div>
+                                <p class="hint">Leave boxes unchecked for normal both-way racing.</p>
+                            }
+
                             <div class="form-grid">
-                                <label>Slow skip (KB/s)<input type="number" min="0" @bind="_form.SlowSkipKBps" placeholder="0 = off" /></label>
+                                <label>Minimum race speed (KB/s)<input type="number" min="0" @bind="_form.SlowSkipKBps" placeholder="0 = off" /></label>
                                 <label>XDUPE mode
                                     <select @bind="_form.XdupeMode">
-                                        <option value="3">3 - detailed duplicate names</option>
-                                        <option value="1">1 - basic duplicate mode</option>
-                                        <option value="2">2 - extended duplicate mode</option>
-                                        <option value="4">4 - server-specific mode</option>
+                                        <option value="3">3 - detailed file list (recommended)</option>
+                                        <option value="1">1 - basic duplicate check</option>
+                                        <option value="2">2 - extended duplicate check</option>
+                                        <option value="4">4 - site/server specific</option>
                                     </select>
                                 </label>
                             </div>
-                            <p class="hint">Abort a race file averaging below this speed and move to the next one. Enforced as a time budget (size ÷ speed + grace), since FXP data doesn't pass through the client.</p>
-                            <p class="hint">XDUPE mode is sent as <code>SITE XDUPE &lt;mode&gt;</code> after login when XDUPE is enabled. Use mode 3 unless your FTPd/site docs require another value; it lets the server report duplicate filenames so the racer can skip already-present files faster.</p>
+                            <p class="hint">0 disables speed skipping. If a file is too slow, WeaveFXP gives up on that file and races another one.</p>
+                            <p class="hint">XDUPE asks the FTP server which files already exist. Mode 3 is the normal choice because it returns the most useful duplicate filename information.</p>
                         </section>
 
                         <section class="panel-card">
@@ -393,6 +425,14 @@
             Affils = new List<string>(site.Affils),
             Skiplist = new List<string>(site.Skiplist),
             Sections = site.Sections.Select(x => new SiteSection { Name = x.Name, Section = x.Section }).ToList(),
+            // Carry EVERY field through the form so Save never wipes settings that have
+            // no input on this page (racing blocks, slow-skip, TLS orientation, and the
+            // cbftp allow/block policy + except lists synced over the API).
+            BlockTransferTo = site.BlockTransferTo, BlockTransferFrom = site.BlockTransferFrom,
+            SlowSkipKBps = site.SlowSkipKBps, FxpPassiveSide = site.FxpPassiveSide, SslDataClient = site.SslDataClient,
+            TransferSourcePolicy = site.TransferSourcePolicy, TransferTargetPolicy = site.TransferTargetPolicy,
+            ExceptSourceSites = new List<string>(site.ExceptSourceSites),
+            ExceptTargetSites = new List<string>(site.ExceptTargetSites),
         };
     }
 
@@ -421,6 +461,28 @@
         _password = "";
         _tab = "basic";
         Toast("Duplicated form; enter password and save");
+    }
+
+    private IEnumerable<string> OtherSiteNames() =>
+        _sites.Select(s => s.Name).Where(n => !n.Equals(_form.Name, StringComparison.OrdinalIgnoreCase));
+
+    private bool IsTargetBlocked(string other) => !_form.IsAllowedTargetSite(other);
+
+    private bool IsSourceBlocked(string other) => !_form.IsAllowedSourceSite(other);
+
+    private void SetTargetBlocked(string other, ChangeEventArgs e)
+        => ApplyBlocked(_form.ExceptTargetSites, _form.TransferTargetPolicy, other, e.Value is bool b && b);
+
+    private void SetSourceBlocked(string other, ChangeEventArgs e)
+        => ApplyBlocked(_form.ExceptSourceSites, _form.TransferSourcePolicy, other, e.Value is bool b && b);
+
+    // Checkbox means "blocked". Translate that to cbftp's policy + exception model:
+    // under Allow the exception list holds blocked sites; under Block it holds allowed sites.
+    private static void ApplyBlocked(List<string> except, SiteTransferPolicy policy, string name, bool blocked)
+    {
+        except.RemoveAll(x => x.Equals(name, StringComparison.OrdinalIgnoreCase));
+        var inExcept = policy == SiteTransferPolicy.Allow ? blocked : !blocked;
+        if (inExcept) except.Add(name);
     }
 
     private void AddSection() => _form.Sections.Add(new SiteSection());

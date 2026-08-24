@@ -1,5 +1,6 @@
 @inherits LayoutComponentBase
 @inject Microsoft.Extensions.Hosting.IHostApplicationLifetime AppLifetime
+@inject WeaveEngine Engine
 
 <div class="app">
     <aside class="sidebar">
@@ -7,7 +8,7 @@
             <img class="brand-logo" src="weavefxp-logo.svg" alt="" />
             <div>
                 <div class="brand-name">WEAVE<span>FXP</span></div>
-                <div class="brand-meta">v1.0.0 | web fxp</div>
+                <div class="brand-meta">v@(Engine.Version) | web fxp</div>
             </div>
         </div>
 

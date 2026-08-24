@@ -57,13 +57,14 @@
                     }
                     @foreach (var job in ActiveJobs.Take(8))
                     {
-                        <div class="dash-job">
+                        var dashboardPercent = DashboardPercent(job);
+                        <NavLink class="dash-job" href="@RaceHref(job)" aria-label="@($"Open {Label(job)} in races")">
                             <span class="badge @StateClass(job.State)">@job.State.ToString().ToLowerInvariant()</span>
                             <strong>@Label(job)</strong>
                             <span>@job.Request.FromSite -> @job.Request.ToSite</span>
-                            <span class="job-bar"><span class="job-bar-fill @(job.Percent < 0 ? "indet" : "")" style="width:@(job.Percent < 0 ? 100 : job.Percent)%"></span></span>
-                            <span class="mono dim">@Progress(job)</span>
-                        </div>
+                            <span class="job-bar"><span class="job-bar-fill @(dashboardPercent < 0 ? "indet" : "")" style="width:@(dashboardPercent < 0 ? 100 : dashboardPercent)%"></span></span>
+                            <span class="mono dim dash-job-stats">@Progress(job)</span>
+                        </NavLink>
                     }
                 </div>
             </article>
@@ -120,10 +121,61 @@
 
     private static string Progress(Job job)
     {
+        if (job.Type == JobType.Race)
+        {
+            var covered = RaceCoveredFiles(job);
+            var total = RaceTotalFiles(job);
+            var racedCount = RaceRacedFiles(job);
+            var racedBytes = RaceRacedBytes(job);
+            var count = total > 0 ? $"{covered}/{total} files covered" : $"{covered} files covered";
+            var raced = $" · {racedCount} {(racedCount == 1 ? "file" : "files")} raced";
+            var bytes = job.BytesTotal > 0
+                ? $" · {HumanSize(racedBytes)} raced of {HumanSize(job.BytesTotal)}"
+                : racedBytes > 0 ? $" · {HumanSize(racedBytes)} raced" : "";
+            var speed = job.SpeedBps > 0 ? $" · {Speed(job.SpeedBps)}" : "";
+            return $"{count}{raced}{bytes}{speed}";
+        }
         if (job.Percent >= 0) return $"{job.Percent}%";
         if (job.FilesDone > 0) return $"{job.FilesDone} file(s)";
         return "waiting";
     }
+
+    private static int DashboardPercent(Job job)
+    {
+        if (job.Type != JobType.Race) return job.Percent;
+        var total = RaceTotalFiles(job);
+        return total > 0
+            ? (int)Math.Clamp((long)RaceCoveredFiles(job) * 100 / total, 0, 100)
+            : job.Percent;
+    }
+
+    private static int RaceTotalFiles(Job job) =>
+        Math.Max(job.FilesTotal, job.Files
+            .Where(f => !IsMissingMarkerRow(f))
+            .Select(f => f.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count());
+
+    private static int RaceCoveredFiles(Job job) =>
+        Math.Max(job.FilesDone, job.Files
+            .Where(f => !IsMissingMarkerRow(f) && f.Status is "done" or "dupe")
+            .Select(f => f.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count());
+
+    private static int RaceRacedFiles(Job job) =>
+        Math.Max(job.FilesDone, job.Files.Count(f => !IsMissingMarkerRow(f) && f.Status == "done"));
+
+    private static long RaceRacedBytes(Job job) =>
+        Math.Max(job.CumulativeBytes, job.Files
+            .Where(f => !IsMissingMarkerRow(f) && f.Status == "done")
+            .Sum(f => Math.Max(0, f.Size)));
+
+    private static bool IsMissingMarkerRow(FileTransfer file) =>
+        file.Name.EndsWith("-MISSING", StringComparison.OrdinalIgnoreCase);
+
+    private static string RaceHref(Job job) =>
+        $"races?job={Uri.EscapeDataString(job.Id)}#race-{job.Id}";
 
     private static double JobSpeed(Job job)
     {

@@ -44,7 +44,14 @@ if (string.IsNullOrWhiteSpace(manualUrl))
     {
         options.Listen(ListenAddress(startupSettings.WebBindAddress), startupSettings.WebPort);
         if (startupSettings.EnableHttpsJsonApi)
-            options.Listen(ListenAddress(ApiHostForListen(startupSettings)), startupSettings.HttpsJsonApiPort);
+        {
+            // The JSON API speaks real HTTPS, like cbftp's REST API: clients such as
+            // dtool connect with SSL and fail the handshake on a plain-HTTP listener.
+            // Self-signed cert, generated once and persisted in data/keys.
+            var apiCert = LoadOrCreateApiCertificate(engine.DataDir);
+            options.Listen(ListenAddress(ApiHostForListen(startupSettings)), startupSettings.HttpsJsonApiPort,
+                lo => lo.UseHttps(apiCert));
+        }
     });
 }
 else
@@ -86,10 +93,11 @@ app.Use(async (ctx, next) =>
         return;
     }
 
+    AppSettings? apiSettings = null;
     if (shouldAuthorizeApi)
     {
-        var currentApiSettings = engine.Settings(false);
-        if (!currentApiSettings.EnableHttpsJsonApi)
+        apiSettings = engine.Settings(false);
+        if (!apiSettings.EnableHttpsJsonApi)
         {
             ctx.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
@@ -97,13 +105,39 @@ app.Use(async (ctx, next) =>
 
         engine.Log("api", "", "info", $"{ctx.Request.Method} {ctx.Request.Path}{ctx.Request.QueryString} from {ctx.Connection.RemoteIpAddress}");
 
-        if (!ApiAuthorized(ctx, currentApiSettings.ApiPassword))
+        if (!ApiAuthorized(ctx, apiSettings.ApiPassword))
         {
             ctx.Response.Headers.WWWAuthenticate = "Bearer";
             ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
             await ctx.Response.WriteAsync("API password required");
+            engine.Log("api", "", "warn", $"→ 401 {ctx.Request.Method} {ctx.Request.Path}: API password required");
             return;
         }
+    }
+
+    // Debug logging: capture WHAT the API answers, so client problems (dtool etc.)
+    // are diagnosable straight from the Logs page instead of a packet sniffer.
+    if (apiSettings?.DebugLogging == true)
+    {
+        var original = ctx.Response.Body;
+        using var buffer = new MemoryStream();
+        ctx.Response.Body = buffer;
+        try
+        {
+            var handled = apiOnlyPort && isWeaveFxpApi && await TryHandleWeaveFxpApiAsync(ctx, engine);
+            if (!handled) await next();
+        }
+        finally
+        {
+            ctx.Response.Body = original;
+            var len = (int)Math.Min(buffer.Length, 4000);
+            var preview = Encoding.UTF8.GetString(buffer.GetBuffer(), 0, len).Replace('\n', ' ').Replace('\r', ' ');
+            if (buffer.Length > 4000) preview += $"… (+{buffer.Length - 4000} bytes)";
+            engine.Log("api", "", "info", $"→ {ctx.Response.StatusCode} {ctx.Request.Method} {ctx.Request.Path}: {preview}");
+            buffer.Position = 0;
+            await buffer.CopyToAsync(original);
+        }
+        return;
     }
 
     if (apiOnlyPort && isWeaveFxpApi && await TryHandleWeaveFxpApiAsync(ctx, engine))
@@ -121,6 +155,7 @@ api.MapGet("/health", () => new
     data_dir = engine.DataDir,
     load_warning = engine.LoadWarning,
     jobs = engine.Jobs().Count,
+    archived_jobs = engine.ArchivedJobCount(),
     releases = engine.Releases().Count,
 });
 api.MapGet("/settings", () => engine.Settings(true));
@@ -171,6 +206,7 @@ api.MapDelete("/runtime-data", () => Results.Ok(engine.ClearRuntimeData()));
 api.MapPost("/fxp", (TransferRequest request) => { request.ViaApi = true; return engine.StartFxp(request); });
 api.MapPost("/spread", (SpreadRequest request) => { request.ViaApi = true; return engine.StartSpread(request); });
 api.MapPost("/download", (DownloadRequest request) => { request.ViaApi = true; return engine.StartDownload(request); });
+api.MapPost("/upload", (UploadRequest request) => { request.ViaApi = true; return engine.StartUpload(request); });
 api.MapPost("/dupe", async (DupeRequest request) =>
     await engine.CheckDupeAsync(request.Site, request.Path, request.Name));
 api.MapPost("/release-check", async (ReleaseCheckRequest request) =>
@@ -184,7 +220,10 @@ app.MapRazorComponents<App>()
 // Warm the engine and print where state lives.
 Console.WriteLine($"WeaveFXP WebUI listening on {listen.WebUrl}");
 if (listen.ApiUrl is not null)
+{
     Console.WriteLine($"WeaveFXP JSON API listening on {listen.ApiUrl}");
+    engine.Log("api", "http", "info", $"JSON API listening on {listen.ApiUrl}");
+}
 Console.WriteLine($"WeaveFXP effective listeners: {url}");
 Console.WriteLine($"State file: {engine.StatePath}");
 Console.WriteLine($"Data folder: {engine.DataDir}");
@@ -195,7 +234,38 @@ if (!string.IsNullOrWhiteSpace(engine.LoadWarning))
 if (!args.Contains("--no-browser", StringComparer.OrdinalIgnoreCase))
     OpenBrowser(BrowserUrl(listen.WebUrl));
 
+// cbftp-compatible UDP API: dtool and friends send plaintext datagrams like
+// "<password> race <section> <release> <site1>,<site2>". Enable it in Settings.
+StartUdpApi(engine);
+
 app.Run();
+
+// Self-signed certificate for the HTTPS JSON API (cbftp-style). Generated once,
+// persisted in data/keys/api-cert.pfx so the fingerprint stays stable.
+static System.Security.Cryptography.X509Certificates.X509Certificate2 LoadOrCreateApiCertificate(string dataDir)
+{
+    const string pfxPassword = "weavefxp";
+    var dir = Path.Combine(dataDir, "keys");
+    Directory.CreateDirectory(dir);
+    var pfxPath = Path.Combine(dir, "api-cert.pfx");
+    if (File.Exists(pfxPath))
+    {
+        try { return new System.Security.Cryptography.X509Certificates.X509Certificate2(pfxPath, pfxPassword); }
+        catch { /* unreadable — regenerate below */ }
+    }
+    using var rsa = RSA.Create(2048);
+    var req = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+        "CN=WeaveFXP API", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+    var san = new System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder();
+    san.AddDnsName("localhost");
+    san.AddDnsName(Environment.MachineName);
+    req.CertificateExtensions.Add(san.Build());
+    using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(20));
+    var pfx = cert.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Pfx, pfxPassword);
+    try { File.WriteAllBytes(pfxPath, pfx); } catch { /* still usable in-memory */ }
+    // Re-import from PFX: Kestrel on Windows needs the persisted private key handle.
+    return new System.Security.Cryptography.X509Certificates.X509Certificate2(pfx, pfxPassword);
+}
 
 static ListenConfig BuildListenConfig(AppSettings settings)
 {
@@ -207,7 +277,7 @@ static ListenConfig BuildListenConfig(AppSettings settings)
 
     if (settings.EnableHttpsJsonApi)
     {
-        apiUrl = FormatListenUrl("http", ApiHostForListen(settings), settings.HttpsJsonApiPort);
+        apiUrl = FormatListenUrl("https", ApiHostForListen(settings), settings.HttpsJsonApiPort);
         apiPorts.Add(settings.HttpsJsonApiPort);
         if (!urls.Contains(apiUrl, StringComparer.OrdinalIgnoreCase))
             urls.Add(apiUrl);
@@ -320,17 +390,81 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
             if (site is null)
                 return await JsonStatus(ctx, StatusCodes.Status404NotFound, new { error = "site not found" });
 
-            await Results.Json(new
+            // cbftp-compatible site object. dtool parses this response LINE BY LINE, so
+            // it MUST be pretty-printed (each array element on its own line) and it reads
+            // except_source_sites then except_target_sites, finalising when it sees a
+            // "force_binary" line — which therefore has to come AFTER the except lists.
+            // Field names mirror cbftp's RestApi::handleSiteGet.
+            var siteJson = new
             {
                 name = site.Name,
                 addresses = new[] { $"{site.Host}:{site.Port}" },
                 user = site.Username,
                 password = site.Password,
                 base_path = site.BasePath,
+                max_logins = site.LoginSlots,
+                max_sim_up = site.UploadSlots,
+                max_sim_down = site.DownloadSlots,
+                pret = site.UsePret,
+                list_command = string.IsNullOrWhiteSpace(site.ListCommand) ? "STAT_L" : site.ListCommand,
+                tls_mode = site.TlsMode.ToString().ToUpperInvariant(),
+                sscn = site.UseSscn,
+                cpsv = site.CpsvSupported,
+                cepr = site.CeprSupported,
+                broken_pasv = site.BrokenPasv,
                 disabled = false,
+                allow_upload = site.BlockTransferTo ? "NO" : "YES",
+                allow_download = site.BlockTransferFrom ? "NO" : "YES",
+                xdupe = site.UseXdupe,
                 sections = site.Sections.Select(s => new { name = s.Name, path = s.Section }).ToArray(),
                 affils = site.Affils,
+                transfer_source_policy = site.TransferSourcePolicy.ToString().ToUpperInvariant(),
+                transfer_target_policy = site.TransferTargetPolicy.ToString().ToUpperInvariant(),
+                except_source_sites = site.ExceptSourceSites,
+                except_target_sites = site.ExceptTargetSites,
+                // dtool's line parser finalises source/target lists on this key.
+                force_binary_mode = site.ForceBinary,
                 skiplist = site.Skiplist,
+            };
+            ctx.Response.ContentType = "application/json; charset=utf-8";
+            await ctx.Response.WriteAsync(JsonSerializer.Serialize(siteJson, new JsonSerializerOptions { WriteIndented = true }));
+            return true;
+        }
+
+        // dtool syncs source/target route exclusions with PATCH /sites/<name>
+        // (cbftp-compatible: except_source_sites / except_target_sites lists).
+        if (HttpMethods.IsPatch(ctx.Request.Method) && path.StartsWith("/sites/", StringComparison.OrdinalIgnoreCase))
+        {
+            var name = Uri.UnescapeDataString(path["/sites/".Length..]);
+            var site = engine.Site(name);
+            if (site is null)
+                return await JsonStatus(ctx, StatusCodes.Status404NotFound, new { error = "site not found" });
+
+            using var doc = await ReadJsonBodyAsync(ctx);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("except_source_sites", out var es) && es.ValueKind == JsonValueKind.Array)
+                site.ExceptSourceSites = es.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String)
+                    .Select(e => e.GetString()!).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+            if (root.TryGetProperty("except_target_sites", out var et) && et.ValueKind == JsonValueKind.Array)
+                site.ExceptTargetSites = et.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String)
+                    .Select(e => e.GetString()!).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+            // cbftp field names: "ALLOW"/"BLOCK".
+            if (root.TryGetProperty("transfer_source_policy", out var sp) && sp.ValueKind == JsonValueKind.String)
+                site.TransferSourcePolicy = sp.GetString()!.Equals("BLOCK", StringComparison.OrdinalIgnoreCase)
+                    ? SiteTransferPolicy.Block : SiteTransferPolicy.Allow;
+            if (root.TryGetProperty("transfer_target_policy", out var tp) && tp.ValueKind == JsonValueKind.String)
+                site.TransferTargetPolicy = tp.GetString()!.Equals("BLOCK", StringComparison.OrdinalIgnoreCase)
+                    ? SiteTransferPolicy.Block : SiteTransferPolicy.Allow;
+
+            var saved = engine.SaveSite(site.Name, site);
+            engine.Log("api", "compat", "info", $"PATCH {site.Name}: srcpol={saved.TransferSourcePolicy} tgtpol={saved.TransferTargetPolicy} except_source=[{string.Join(",", saved.ExceptSourceSites)}] except_target=[{string.Join(",", saved.ExceptTargetSites)}]");
+            await Results.Json(new
+            {
+                name = saved.Name,
+                transfer_source_policy = saved.TransferSourcePolicy.ToString().ToUpperInvariant(),
+                transfer_target_policy = saved.TransferTargetPolicy.ToString().ToUpperInvariant(),
+                except_source_sites = saved.ExceptSourceSites,
+                except_target_sites = saved.ExceptTargetSites,
             }).ExecuteAsync(ctx);
             return true;
         }
@@ -412,6 +546,8 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
             if (sites.Count == 0)
                 return await JsonStatus(ctx, StatusCodes.Status400BadRequest, new { error = "sites is required" });
 
+            // cbftp RestApi::finalize(RAW_COMMAND): successes [{name,result}],
+            // failures [{name,reason}], pretty-printed. dtool reads it line by line.
             var successes = new List<object>();
             var failures = new List<object>();
             foreach (var site in sites)
@@ -420,17 +556,19 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
                 {
                     var result = await engine.SendRawCommandAsync(site, command);
                     if (result.Ok)
-                        successes.Add(new { name = site, result = result.Message, code = result.Code });
+                        successes.Add(new { name = site, result = result.Message });
                     else
-                        failures.Add(new { name = site, error = result.Message, code = result.Code });
+                        failures.Add(new { name = site, reason = result.Message });
                 }
                 catch (Exception ex)
                 {
-                    failures.Add(new { name = site, error = ex.Message });
+                    failures.Add(new { name = site, reason = ex.Message });
                 }
             }
 
-            await Results.Json(new { successes, failures }).ExecuteAsync(ctx);
+            ctx.Response.ContentType = "application/json; charset=utf-8";
+            await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { successes, failures },
+                new JsonSerializerOptions { WriteIndented = true }));
             return true;
         }
 
@@ -809,6 +947,216 @@ static string GuessContentType(string path)
         ".webp" => "image/webp",
         _ => "application/octet-stream",
     };
+}
+
+// ---- cbftp-compatible UDP API ------------------------------------------------------
+// Speaks the same plaintext datagram protocol as cbftp's RemoteCommandHandler:
+//   <password> race <section> <release> <site1>,<site2>|* [dlonlysites]
+//   <password> fxp <srcsite> <path-or-section> <release> <dstsite> <path-or-section> [dstrelease]
+//   <password> raw <sitelist>|* <raw command...>
+//   <password> download <site> <path-or-section> [name]
+// "distribute"/"prepare" are accepted as "race". Encrypted mode is not supported.
+static void StartUdpApi(WeaveEngine engine)
+{
+    var s = engine.Settings(false);
+    if (!s.EnableUdpApi) return;
+    var port = s.UdpApiPort > 0 ? s.UdpApiPort : 59010;
+    _ = Task.Run(async () =>
+    {
+        System.Net.Sockets.UdpClient udp;
+        try
+        {
+            udp = new System.Net.Sockets.UdpClient(new IPEndPoint(IPAddress.Any, port));
+        }
+        catch (Exception ex)
+        {
+            engine.Log("api", "udp", "error", $"UDP API could not bind port {port}: {ex.Message}");
+            return;
+        }
+        Console.WriteLine($"WeaveFXP UDP API (cbftp-compatible) listening on 0.0.0.0:{port}");
+        engine.Log("api", "udp", "info", $"UDP API listening on port {port}");
+        using (udp)
+        {
+            while (true)
+            {
+                try
+                {
+                    var r = await udp.ReceiveAsync().ConfigureAwait(false);
+                    var text = Encoding.UTF8.GetString(r.Buffer).Trim();
+                    HandleUdpApiMessage(engine, text, r.RemoteEndPoint);
+                }
+                catch (Exception ex)
+                {
+                    engine.Log("api", "udp", "warn", "UDP receive failed: " + ex.Message);
+                    await Task.Delay(1000).ConfigureAwait(false);
+                }
+            }
+        }
+    });
+}
+
+static void HandleUdpApiMessage(WeaveEngine engine, string text, IPEndPoint from)
+{
+    var tokens = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+    if (tokens.Length < 2)
+    {
+        engine.Log("api", "udp", "warn", $"bad message from {from}");
+        return;
+    }
+    var settings = engine.Settings(false);
+    var configured = (settings.ApiPassword ?? "").Trim();
+    if (configured.Length > 0 && !SecretMatches(tokens[0], configured))
+    {
+        engine.Log("api", "udp", "warn", $"invalid password from {from}");
+        return;
+    }
+    var command = tokens[1].ToLowerInvariant();
+    var args = tokens.Skip(2).ToArray();
+    engine.Log("api", "udp", "info", $"{from.Address}: {command} {string.Join(' ', args)}");
+    try
+    {
+        switch (command)
+        {
+            case "race":
+            case "distribute":
+            case "prepare": // no prepared-job queue — start it right away
+                UdpRace(engine, args);
+                break;
+            case "fxp":
+                UdpFxp(engine, args);
+                break;
+            case "raw":
+                if (args.Length >= 2)
+                {
+                    var cmd = string.Join(' ', args.Skip(1));
+                    foreach (var site in UdpSiteList(engine, args[0]))
+                        _ = engine.SendRawCommandAsync(site, cmd);
+                }
+                break;
+            case "download":
+                if (args.Length >= 2)
+                {
+                    var basePath = UdpTranslate(engine, args[0], args[1]);
+                    if (basePath is null) { engine.Log("api", "udp", "warn", $"download: unknown section/path '{args[1]}' on {args[0]}"); return; }
+                    var srcPath = args.Length > 2 ? MaybeAppendRelease(basePath, args[2]) : basePath;
+                    engine.StartDownload(new DownloadRequest { Site = args[0], SourcePath = srcPath, ViaApi = true });
+                }
+                break;
+            default:
+                engine.Log("api", "udp", "warn", $"unsupported command: {command}");
+                break;
+        }
+    }
+    catch (Exception ex)
+    {
+        engine.Log("api", "udp", "warn", $"{command} failed: {ex.Message}");
+    }
+}
+
+static void UdpRace(WeaveEngine engine, string[] args)
+{
+    if (args.Length < 3)
+    {
+        engine.Log("api", "udp", "warn", "bad race format (want: race <section> <release> <sites>)");
+        return;
+    }
+    var section = args[0];
+    var release = args[1];
+    var sites = UdpSiteList(engine, args[2])
+        .Where(n => engine.Site(n) is not null)
+        .Where(n => TryResolveRequiredSectionBasePath(engine.Site(n)!, section, out _))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+    if (sites.Count < 2)
+    {
+        engine.Log("api", "udp", "warn", $"race '{release}': section '{section}' not configured on enough sites ({sites.Count})");
+        return;
+    }
+    // Pick the first site allowed to be a source, then every other site it may reach
+    // becomes a target — using the same cbftp policy+exception gate as the mesh.
+    var srcName = sites.FirstOrDefault(n => !engine.Site(n)!.BlockTransferFrom);
+    if (srcName is null)
+    {
+        engine.Log("api", "udp", "warn", $"race '{release}': every candidate source is blocked");
+        return;
+    }
+    var src = engine.Site(srcName)!;
+    var targets = sites.Where(n => !n.Equals(srcName, StringComparison.OrdinalIgnoreCase))
+        .Where(n => engine.TransferAllowed(src, engine.Site(n)!))
+        .ToList();
+    if (targets.Count == 0)
+    {
+        engine.Log("api", "udp", "warn", $"race '{release}': no allowed targets from {srcName} (block/except rules)");
+        return;
+    }
+    // ONE-DIRECTIONAL: an announce means the files are on the source. Start src -> each
+    // target directly (a race per target). We deliberately do NOT use the bidirectional
+    // spread mesh here — that also builds target -> src, which has no files and just
+    // sits idle as a dead 0/1 "Running" job until it times out.
+    TryResolveRequiredSectionBasePath(src, section, out var srcBase);
+    var srcPath = MaybeAppendRelease(srcBase, release);
+    foreach (var targetName in targets)
+    {
+        TryResolveRequiredSectionBasePath(engine.Site(targetName)!, section, out var dstBase);
+        engine.StartFxp(new TransferRequest
+        {
+            FromSite = srcName,
+            ToSite = targetName,
+            SourcePath = srcPath,
+            DestPath = MaybeAppendRelease(dstBase, release),
+            Label = release,
+            Race = true,
+            ViaApi = true,
+        });
+    }
+}
+
+static void UdpFxp(WeaveEngine engine, string[] args)
+{
+    if (args.Length < 5)
+    {
+        engine.Log("api", "udp", "warn", "bad fxp format (want: fxp <src> <path> <rls> <dst> <path> [rls])");
+        return;
+    }
+    var srcSite = args[0];
+    var dstSite = args[3];
+    var srcBase = UdpTranslate(engine, srcSite, args[1]);
+    var dstBase = UdpTranslate(engine, dstSite, args[4]);
+    if (srcBase is null || dstBase is null)
+    {
+        engine.Log("api", "udp", "warn", $"fxp: unknown section/path ({args[1]} on {srcSite} / {args[4]} on {dstSite})");
+        return;
+    }
+    var srcRls = args[2];
+    var dstRls = args.Length > 5 ? args[5] : args[2];
+    engine.StartFxp(new TransferRequest
+    {
+        FromSite = srcSite,
+        ToSite = dstSite,
+        SourcePath = MaybeAppendRelease(srcBase, srcRls),
+        DestPath = MaybeAppendRelease(dstBase, dstRls),
+        Label = srcRls,
+        Race = true,
+        ViaApi = true,
+    });
+}
+
+// cbftp's SectionUtil::useOrSectionTranslate: a leading "/" means a literal path,
+// anything else is a section NAME looked up in that site's configured sections.
+static string? UdpTranslate(WeaveEngine engine, string siteName, string pathOrSection)
+{
+    var site = engine.Site(siteName);
+    if (site is null) return null;
+    pathOrSection = (pathOrSection ?? "").Trim();
+    if (pathOrSection.StartsWith('/')) return NormalizeRemotePath(pathOrSection);
+    return TryResolveRequiredSectionBasePath(site, pathOrSection, out var p) ? p : null;
+}
+
+static List<string> UdpSiteList(WeaveEngine engine, string sitestring)
+{
+    if (sitestring == "*")
+        return engine.Sites(false).Select(s => s.Name).ToList();
+    return sitestring.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 }
 
 static bool TryResolveRequiredSectionBasePath(Site site, string section, out string path)

@@ -5,6 +5,7 @@ publish/
 *.user
 Release/
 OUD/
+PRESERVE_DATA/
 .tmp-*.png
 *.exe
 *.dll

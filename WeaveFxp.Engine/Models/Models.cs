@@ -16,11 +16,16 @@ public enum FxpPassiveSide { Auto, Source, Destination }
 // Which side acts as the TLS client on the FXP data channel. Auto uses the passive side.
 public enum SslDataClientSide { Auto, Source, Destination }
 
+// cbftp transfer policy: the default stance toward other sites, flipped per-site by
+// the except lists. Allow = trade with everyone (except list = blocklist);
+// Block = trade with no one (except list = allowlist).
+public enum SiteTransferPolicy { Allow, Block }
+
 public enum TransferProtocol { PreferIPv4, IPv4Only, IPv6Only, Any }
 
 public enum ApiListenMode { Local, All, Interface }
 
-public enum JobType { Fxp, Race, Download }
+public enum JobType { Fxp, Race, Download, Upload }
 
 public enum JobState { Queued, Running, Succeeded, Failed, Cancelled }
 
@@ -36,6 +41,8 @@ public sealed class PortRange
 
 public sealed class AppSettings
 {
+    public const int DefaultRacePollIntervalMs = 250;
+
     public string WebBindAddress { get; set; } = "127.0.0.1";
     public int WebPort { get; set; } = 8788;
     public string BindInterface { get; set; } = "";
@@ -56,8 +63,13 @@ public sealed class AppSettings
 
     public ApiListenMode ApiListeningMode { get; set; } = ApiListenMode.All;
     public string DownloadDir { get; set; } = "downloads";
+    public int LocalDownloadSlots { get; set; } = 8;
+    public int LocalUploadSlots { get; set; } = 8;
+    public int TcpSendBufferKBytes { get; set; } = 1024;
+    public int TcpReceiveBufferKBytes { get; set; } = 1024;
     public int MaxConcurrentFxpJobs { get; set; } = 2;
     public int MaxConcurrentRaceJobs { get; set; } = 2;
+    public int StoredJobHistoryLimit { get; set; } = 150;
     // Race loop: how often to re-list the source for new files, and how many
     // consecutive no-new-file cycles to allow before giving up.
     // Verbose FTP protocol logging (every command/response into the FTP Log). Costs
@@ -65,8 +77,9 @@ public sealed class AppSettings
     public bool FtpDebugLog { get; set; }
     // Learned "source>dest" FXP TLS client orientations (see FxpTransfer).
     public Dictionary<string, bool> FxpTlsRoleFlip { get; set; } = new();
-    public int RacePollIntervalMs { get; set; } = 500;
-    public int RaceMaxIdleCycles { get; set; } = 30;
+    public int RacePollIntervalMs { get; set; } = DefaultRacePollIntervalMs;
+    public int RaceMaxIdleCycles { get; set; } = 600;
+    public bool RaceDestinationPrecheck { get; set; }
     public int JobWatchdogTimeoutMinutes { get; set; } = 120;
     public bool SkipEmptyFolders { get; set; } = true;
     public List<string> GlobalSkiplist { get; set; } = new();
@@ -97,11 +110,24 @@ public sealed class AppSettings
         if (UdpApiPort == 0) UdpApiPort = 59010;
         if (MaxConcurrentFxpJobs == 0) MaxConcurrentFxpJobs = 2;
         if (MaxConcurrentRaceJobs == 0) MaxConcurrentRaceJobs = 2;
+        if (StoredJobHistoryLimit == 0) StoredJobHistoryLimit = 150;
+        StoredJobHistoryLimit = Math.Clamp(StoredJobHistoryLimit, 25, 150);
+        if (LocalDownloadSlots == 0) LocalDownloadSlots = 8;
+        LocalDownloadSlots = Math.Clamp(LocalDownloadSlots, 1, 64);
+        if (LocalUploadSlots == 0) LocalUploadSlots = 8;
+        LocalUploadSlots = Math.Clamp(LocalUploadSlots, 1, 64);
+        TcpSendBufferKBytes = Math.Clamp(TcpSendBufferKBytes, 0, 16384);
+        TcpReceiveBufferKBytes = Math.Clamp(TcpReceiveBufferKBytes, 0, 16384);
         FxpTlsRoleFlip ??= new Dictionary<string, bool>();
-        if (RacePollIntervalMs == 0) RacePollIntervalMs = 500;
-        RacePollIntervalMs = Math.Clamp(RacePollIntervalMs, 100, 30000);
-        if (RaceMaxIdleCycles == 0) RaceMaxIdleCycles = 30;
-        RaceMaxIdleCycles = Math.Clamp(RaceMaxIdleCycles, 1, 100000);
+        // 500ms was the old conservative default; migrate it to a faster but still
+        // gentle race loop unless the user later chooses another value.
+        if (RacePollIntervalMs == 0 || RacePollIntervalMs == 500)
+            RacePollIntervalMs = DefaultRacePollIntervalMs;
+        RacePollIntervalMs = Math.Clamp(RacePollIntervalMs, 25, 30000);
+        // <= 60 covers the old defaults (30/60) from before we learned cbftp waits
+        // ~60 SECONDS of no list changes — at a 25ms poll that needs ~600 cycles.
+        if (RaceMaxIdleCycles <= 60) RaceMaxIdleCycles = 600;
+        RaceMaxIdleCycles = Math.Clamp(RaceMaxIdleCycles, 61, 100000);
         if (JobWatchdogTimeoutMinutes == 0) JobWatchdogTimeoutMinutes = 120;
         JobWatchdogTimeoutMinutes = Math.Clamp(JobWatchdogTimeoutMinutes, 5, 10080);
         GlobalSkiplist = NormalizeList(GlobalSkiplist);
@@ -135,6 +161,10 @@ public sealed class AppSettings
             throw new ArgumentException("max concurrent fxp jobs must be at least 1");
         if (MaxConcurrentRaceJobs < 1)
             throw new ArgumentException("max concurrent race jobs must be at least 1");
+        if (LocalDownloadSlots < 1 || LocalUploadSlots < 1)
+            throw new ArgumentException("local transfer slots must be at least 1");
+        if (TcpSendBufferKBytes < 0 || TcpReceiveBufferKBytes < 0)
+            throw new ArgumentException("tcp buffer sizes cannot be negative");
         if (JobWatchdogTimeoutMinutes < 5)
             throw new ArgumentException("job watchdog timeout must be at least 5 minutes");
     }
@@ -194,8 +224,29 @@ public sealed class Site
     public bool AllowUpload { get; set; }
     public bool AllowDownload { get; set; } = true;
     // Racing direction blocks: never send TO this site / never use this site as a source.
+    // These are the blunt cbftp allowupload/allowdownload = NO equivalent.
     public bool BlockTransferTo { get; set; }
     public bool BlockTransferFrom { get; set; }
+    // cbftp's policy + exception model. The policy is the DEFAULT for every other site;
+    // the except list flips those specific sites to the opposite. So:
+    //   TargetPolicy=Allow + except  => "allow all targets EXCEPT these" (blocklist)
+    //   TargetPolicy=Block + except  => "block all targets EXCEPT these" (allowlist)
+    // dtool syncs the except lists via PATCH /sites/<name>; the UI sets the policy.
+    public SiteTransferPolicy TransferSourcePolicy { get; set; } = SiteTransferPolicy.Allow;
+    public SiteTransferPolicy TransferTargetPolicy { get; set; } = SiteTransferPolicy.Allow;
+    public List<string> ExceptSourceSites { get; set; } = new();
+    public List<string> ExceptTargetSites { get; set; } = new();
+
+    // cbftp Site::isAllowedTargetSite: exception sites take the opposite of the policy.
+    public bool IsAllowedTargetSite(string dstName) =>
+        ExceptTargetSites.Any(s => s.Equals(dstName, StringComparison.OrdinalIgnoreCase))
+            ? TransferTargetPolicy == SiteTransferPolicy.Block
+            : TransferTargetPolicy == SiteTransferPolicy.Allow;
+
+    public bool IsAllowedSourceSite(string srcName) =>
+        ExceptSourceSites.Any(s => s.Equals(srcName, StringComparison.OrdinalIgnoreCase))
+            ? TransferSourcePolicy == SiteTransferPolicy.Block
+            : TransferSourcePolicy == SiteTransferPolicy.Allow;
     // Slow-skip: abort a race transfer that averages below this (KB/s) and move on.
     // FXP bytes don't pass through us, so this is enforced as a per-file time budget
     // (size / threshold + grace). 0 = off.
@@ -285,6 +336,8 @@ public sealed class Site
         clone.CompleteMarkers = new List<string>(CompleteMarkers);
         clone.Affils = new List<string>(Affils);
         clone.Skiplist = new List<string>(Skiplist);
+        clone.ExceptSourceSites = new List<string>(ExceptSourceSites);
+        clone.ExceptTargetSites = new List<string>(ExceptTargetSites);
         return clone;
     }
 }
@@ -297,6 +350,8 @@ public sealed class RemoteEntry
     public string Path { get; set; } = "";
     public string Type { get; set; } = "unknown"; // dir | file | link | unknown
     public string LinkTarget { get; set; } = "";
+    public string Owner { get; set; } = "";
+    public string Group { get; set; } = "";
     public long Size { get; set; }
     public DateTime Modified { get; set; }
     public string Raw { get; set; } = "";
@@ -311,6 +366,7 @@ public sealed class TransferRequest
     public string ToSite { get; set; } = "";
     public string SourcePath { get; set; } = "";
     public string DestPath { get; set; } = "";
+    public List<string> MeshSites { get; set; } = new();
     public bool Race { get; set; }
     public bool DryRun { get; set; }
     public string Label { get; set; } = "";
@@ -349,6 +405,15 @@ public sealed class SpreadResult
 }
 
 public sealed class DownloadRequest
+{
+    public string Site { get; set; } = "";
+    public string SourcePath { get; set; } = "";
+    public string DestPath { get; set; } = "";
+    public string Label { get; set; } = "";
+    public bool ViaApi { get; set; }
+}
+
+public sealed class UploadRequest
 {
     public string Site { get; set; } = "";
     public string SourcePath { get; set; } = "";

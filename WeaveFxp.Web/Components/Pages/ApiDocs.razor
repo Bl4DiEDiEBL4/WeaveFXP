@@ -76,6 +76,8 @@
                 $"{CurlPrefix} -X POST {BaseUrl}/api/spread{JsonHeaders} -d \"{{\\\"from_site\\\":\\\"SITE_A\\\",\\\"to_sites\\\":[\\\"SITE_B\\\",\\\"SITE_C\\\"],\\\"source_path\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"dest_path\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"race\\\":true}}\""),
             new ApiExample("Local Download", "Download from one site to the configured local download folder.", "POST",
                 $"{CurlPrefix} -X POST {BaseUrl}/api/download{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"source_path\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
+            new ApiExample("Local Upload", "Upload a local file or folder to a configured site.", "POST",
+                $"{CurlPrefix} -X POST {BaseUrl}/api/upload{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"source_path\\\":\\\"C:\\\\\\\\Path\\\\\\\\Release.Name-GRP\\\",\\\"dest_path\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
             new ApiExample("Raw FTP Command", "Send SITE commands or other single-line FTP commands.", "POST",
                 $"{CurlPrefix} -X POST {BaseUrl}/api/raw-command{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"command\\\":\\\"SITE WHO\\\"}}\""),
         }),

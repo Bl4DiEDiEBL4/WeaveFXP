@@ -56,12 +56,13 @@
                 <tbody>
                     @foreach (var entry in Filtered)
                     {
-                        <tr class="lvl-@entry.Level">
-                            <td class="mono">@entry.Time.ToLocalTime().ToString("HH:mm:ss")</td>
+                        var open = _expanded.Contains(entry.Seq);
+                        <tr class="lvl-@entry.Level log-row" @onclick="() => Toggle(entry.Seq)" title="Click to expand/collapse">
+                            <td class="mono">@entry.Time.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td>
                             <td>@entry.Category</td>
                             <td><span class="pill @LevelClass(entry.Level)">@entry.Level</span></td>
                             <td>@entry.Site</td>
-                            <td class="mono msg">@entry.Message</td>
+                            <td class="mono msg @(open ? "msg-open" : "")">@entry.Message</td>
                         </tr>
                     }
                 </tbody>
@@ -70,6 +71,17 @@
     </section>
 </div>
 
+<style>
+    /* Scoped to this page — does NOT touch app.css. */
+    .logs-page .log-row { cursor: pointer; }
+    .logs-page .log-row:hover { background: rgba(92, 112, 141, 0.10); }
+    .logs-page td.msg.msg-open {
+        overflow: visible;
+        white-space: pre-wrap;
+        word-break: break-all;
+    }
+</style>
+
 @code {
     private List<LogEntry> _logs = new();
     private string _category = "";
@@ -77,6 +89,12 @@
     private string _query = "";
     private int _limit = 500;
     private bool _live = true;
+    private readonly HashSet<long> _expanded = new();
+
+    private void Toggle(long seq)
+    {
+        if (!_expanded.Remove(seq)) _expanded.Add(seq);
+    }
 
     private IEnumerable<LogEntry> Filtered => _logs
         .Where(e => string.IsNullOrWhiteSpace(_query) ||

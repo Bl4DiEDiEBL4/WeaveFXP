@@ -33,18 +33,20 @@
         <div class="table-wrap">
             <table class="data-table races-table">
                 <colgroup>
-                    <col style="width:80px" />
-                    <col style="width:104px" />
-                    <col style="width:460px" />
-                    <col style="width:118px" />
-                    <col style="width:130px" />
-                    <col />
-                    <col style="width:190px" />
+                    <col class="race-col-time" />
+                    <col class="race-col-state" />
+                    <col class="race-col-runtime" />
+                    <col class="race-col-release" />
+                    <col class="race-col-route" />
+                    <col class="race-col-section" />
+                    <col class="race-col-progress" />
+                    <col class="race-col-actions" />
                 </colgroup>
                 <thead>
                     <tr>
                         <th class="col-time">Started</th>
                         <th class="col-state">State</th>
+                        <th class="col-runtime">Runtime</th>
                         <th class="col-release">Release</th>
                         <th class="col-route">Route</th>
                         <th class="col-section">Section</th>
@@ -55,12 +57,12 @@
                 <tbody>
                     @if (Filtered.Count == 0)
                     {
-                        <tr><td colspan="7" class="dim">No races yet. Start one from the browser (race spread) or over the API.</td></tr>
+                        <tr><td colspan="8" class="dim">No races yet. Start one from the browser (race spread) or over the API.</td></tr>
                     }
                     @foreach (var job in Filtered.Take(200))
                     {
-                        <tr class="race-row @(IsOpen(job) ? "open" : "")" @onclick="() => ToggleLog(job)">
-                            <td class="mono col-time">@job.CreatedAt.ToLocalTime().ToString("HH:mm:ss")</td>
+                        <tr id="race-@job.Id" class="race-row @(IsOpen(job) ? "open" : "")" @onclick="() => ToggleLog(job)">
+                            <td class="mono col-time">@Local(job.CreatedAt)</td>
                             <td class="col-state">
                                 <span class="pill @StateClass(job.State)" title="@job.Error">@job.State</span>
                                 @if (job.Paused)
@@ -68,8 +70,9 @@
                                     <span class="pill amber">paused</span>
                                 }
                             </td>
+                            <td class="mono col-runtime">@RaceRuntime(job)</td>
                             <td class="strong race-name" title="@job.Request.SourcePath → @job.Request.DestPath">@RaceName(job)</td>
-                            <td>@job.Request.FromSite → @job.Request.ToSite</td>
+                            <td class="col-route">@RaceRoute(job)</td>
                             <td class="mono race-section" title="@job.Request.SourcePath → @job.Request.DestPath">@RaceSections(job)</td>
                             <td class="col-progress">
                                 @if (job.State == JobState.Running)
@@ -77,18 +80,18 @@
                                     <span class="job-prog wide">
                                         <span class="job-bar">
                                             <span class="job-bar-fill @(job.Percent < 0 ? "indet" : "")"
-                                                  style="width:@(job.Percent < 0 ? 100 : job.Percent)%"></span>
+                                                  style="width:@RacePercent(job)%"></span>
                                         </span>
                                         <span class="job-prog-text">@ProgressText(job)</span>
                                     </span>
                                 }
-                                else if (job.FilesDone > 0 || job.CumulativeBytes > 0)
+                                else if (HasRaceProgress(job) || job.FilesDone > 0 || job.CumulativeBytes > 0)
                                 {
                                     <span class="job-prog wide">
                                         <span class="job-bar">
-                                            <span class="job-bar-fill" style="width:@(job.Percent < 0 ? 100 : job.Percent)%"></span>
+                                            <span class="job-bar-fill" style="width:@RacePercent(job)%"></span>
                                         </span>
-                                        <span class="job-prog-text">@job.FilesDone/@Math.Max(job.FilesTotal, job.FilesDone) files · @HumanSize(job.CumulativeBytes) raced</span>
+                                        <span class="job-prog-text">@ProgressText(job)</span>
                                     </span>
                                 }
                                 else
@@ -119,10 +122,21 @@
                         @if (IsOpen(job))
                         {
                             <tr class="race-log-row">
-                                <td colspan="7">
-                                    @if (job.Files.Count > 0)
+                                <td colspan="8">
+                                    @if (job.Files.Any(f => !IsMissingMarkerRow(f)))
                                     {
                                         <table class="data-table file-table">
+                                            <colgroup>
+                                                <col class="file-col-started" />
+                                                <col class="file-col-use" />
+                                                <col class="file-col-route" />
+                                                <col class="file-col-path" />
+                                                <col class="file-col-transferred" />
+                                                <col class="file-col-name" />
+                                                <col class="file-col-left" />
+                                                <col class="file-col-speed" />
+                                                <col class="file-col-done" />
+                                            </colgroup>
                                             <thead>
                                                 <tr>
                                                     <th>Started</th>
@@ -142,7 +156,7 @@
                                                     <tr>
                                                         <td class="mono">@ft.StartedAt.ToLocalTime().ToString("HH:mm:ss")</td>
                                                         <td class="mono">@Elapsed(ft)</td>
-                                                        <td class="mono route-cell">@job.Request.FromSite → @job.Request.ToSite</td>
+                                                        <td class="mono route-cell">@RaceRoute(job)</td>
                                                         <td class="mono path-cell" title="@TransferPath(job, ft)">@TransferPath(job, ft)</td>
                                                         <td class="mono transferred-cell">@Transferred(ft)</td>
                                                         <td class="mono file-name" title="@FileTitle(ft)">@ft.Name</td>
@@ -155,9 +169,9 @@
                                         </table>
                                     }
                                     <details class="race-raw-log">
-                                        <summary>Raw log (last @Math.Min(job.Events.Count, 200) of @job.Events.Count lines)</summary>
+                                        <summary>Raw log (@job.Events.Count lines)</summary>
                                         <ul class="events">
-                                            @foreach (var ev in job.Events.TakeLast(200))
+                                            @foreach (var ev in job.Events)
                                             {
                                                 <li class="lvl-@ev.Level">[@ev.Time.ToLocalTime().ToString("HH:mm:ss")] @ev.Level: @ev.Message</li>
                                             }
@@ -188,12 +202,23 @@
     private string _state = "";
     private string? _toast;
 
+    [SupplyParameterFromQuery(Name = "job")]
+    public string? SelectedJobId { get; set; }
+
+    private static string Local(DateTime dt) => dt == default ? "" : dt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+
     protected override void OnInitialized()
     {
         _sites = Engine.Sites(true);
         BuildSectionMap();
         Refresh();
         Engine.Changed += OnChanged;
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (!string.IsNullOrWhiteSpace(SelectedJobId))
+            _open.Add(SelectedJobId);
     }
 
     private void BuildSectionMap()
@@ -235,7 +260,8 @@
                     j.Request.SourcePath.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
                     j.Request.DestPath.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
                     j.Request.FromSite.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
-                    j.Request.ToSite.Contains(needle, StringComparison.OrdinalIgnoreCase));
+                    j.Request.ToSite.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
+                    j.Request.MeshSites.Any(s => s.Contains(needle, StringComparison.OrdinalIgnoreCase)));
             }
             return q.ToList();
         }
@@ -251,7 +277,10 @@
     }
 
     private static List<FileTransfer> FilesNewestFirst(Job job) =>
-        job.Files.OrderByDescending(f => f.StartedAt).Take(150).ToList();
+        job.Files
+            .Where(f => !IsMissingMarkerRow(f))
+            .OrderByDescending(f => f.StartedAt)
+            .ToList();
 
     private static string Elapsed(FileTransfer ft)
     {
@@ -293,6 +322,8 @@
         "done" => "done",
         "fail" => "fail",
         "active" => "active",
+        "expected" => "expected",
+        "queued" => "queued",
         "dupe" => "dupe",
         _ => ft.Status
     };
@@ -302,6 +333,8 @@
         "done" => "green",
         "fail" => "red",
         "active" => "cyan",
+        "expected" => "amber",
+        "queued" => "amber",
         _ => "amber", // dupe / wait
     };
 
@@ -317,10 +350,21 @@
     // Falls back to the path when the section isn't configured on the site.
     private string RaceSections(Job job)
     {
+        if (job.Request.MeshSites.Count > 1)
+        {
+            var meshSrc = SectionNameFor(job.Request.FromSite, ParentPath(job.Request.SourcePath));
+            var meshDst = SectionNameFor(job.Request.MeshSites.FirstOrDefault(s => !s.Equals(job.Request.FromSite, StringComparison.OrdinalIgnoreCase)) ?? job.Request.FromSite, ParentPath(job.Request.DestPath));
+            return meshSrc.Equals(meshDst, StringComparison.OrdinalIgnoreCase) ? meshSrc : $"{meshSrc} → {meshDst}";
+        }
         var src = SectionNameFor(job.Request.FromSite, ParentPath(job.Request.SourcePath));
         var dst = SectionNameFor(job.Request.ToSite, ParentPath(job.Request.DestPath));
         return src.Equals(dst, StringComparison.OrdinalIgnoreCase) ? src : $"{src} → {dst}";
     }
+
+    private static string RaceRoute(Job job) =>
+        job.Request.MeshSites.Count > 1
+            ? string.Join(" ↔ ", job.Request.MeshSites)
+            : $"{job.Request.FromSite} → {job.Request.ToSite}";
 
     private string SectionNameFor(string site, string path)
     {
@@ -394,12 +438,66 @@
 
     private static string ProgressText(Job job)
     {
-        // Progress is the wide fill column — show the current file too. The cell is
-        // single-line + ellipsis, so a very long name just truncates cleanly.
-        var count = job.FilesTotal > 0 ? $"{job.FilesDone}/{job.FilesTotal} files" : $"{job.FilesDone} files";
-        var bytes = job.CumulativeBytes > 0 ? $" · {HumanSize(job.CumulativeBytes)}" : "";
+        var covered = RaceCoveredFiles(job);
+        var total = RaceTotalFiles(job);
+        var raced = RaceRacedFiles(job);
+        var racedBytes = RaceRacedBytes(job);
+        var count = total > 0 ? $"{covered}/{total} files covered" : $"{covered} files covered";
+        var racedFiles = $" · {raced} {(raced == 1 ? "file" : "files")} raced";
+        var bytes = job.BytesTotal > 0
+            ? $" · {HumanSize(racedBytes)} raced of {HumanSize(job.BytesTotal)}"
+            : racedBytes > 0 ? $" · {HumanSize(racedBytes)} raced" : "";
         var speed = job.SpeedBps > 0 ? $" · {Speed(job.SpeedBps)}" : "";
-        var cur = string.IsNullOrEmpty(job.CurrentFile) ? "" : $" · {job.CurrentFile}";
-        return $"{count}{bytes}{speed}{cur}";
+        return $"{count}{racedFiles}{bytes}{speed}";
+    }
+
+    private static int RacePercent(Job job)
+    {
+        if (job.State == JobState.Succeeded) return 100;
+        var total = RaceTotalFiles(job);
+        if (total > 0) return (int)Math.Clamp((long)RaceCoveredFiles(job) * 100 / total, 0, 100);
+        return job.Percent < 0 ? 100 : job.Percent;
+    }
+
+    private static bool HasRaceProgress(Job job) =>
+        job.Type == JobType.Race && (job.FilesTotal > 0 || job.BytesTotal > 0 || job.Files.Any(f => !IsMissingMarkerRow(f)));
+
+    private static int RaceTotalFiles(Job job) =>
+        Math.Max(job.FilesTotal, job.Files
+            .Where(f => !IsMissingMarkerRow(f))
+            .Select(f => f.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count());
+
+    private static int RaceCoveredFiles(Job job)
+    {
+        var coveredNames = job.Files
+            .Where(f => !IsMissingMarkerRow(f) && f.Status is "done" or "dupe")
+            .Select(f => f.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+        return Math.Max(job.FilesDone, coveredNames);
+    }
+
+    private static int RaceRacedFiles(Job job) =>
+        Math.Max(job.FilesDone, job.Files.Count(f => !IsMissingMarkerRow(f) && f.Status == "done"));
+
+    private static long RaceRacedBytes(Job job) =>
+        Math.Max(job.CumulativeBytes, job.Files
+            .Where(f => !IsMissingMarkerRow(f) && f.Status == "done")
+            .Sum(f => Math.Max(0, f.Size)));
+
+    private static bool IsMissingMarkerRow(FileTransfer ft) =>
+        ft.Name.EndsWith("-MISSING", StringComparison.OrdinalIgnoreCase);
+
+    private static string RaceRuntime(Job job)
+    {
+        var start = job.StartedAt == default ? job.CreatedAt : job.StartedAt;
+        if (start == default) return "—";
+        var end = job.Terminal && job.FinishedAt != default ? job.FinishedAt : DateTime.UtcNow;
+        var elapsed = end > start ? end - start : TimeSpan.Zero;
+        if (elapsed.TotalHours >= 1) return $"{(int)elapsed.TotalHours}:{elapsed.Minutes:00}:{elapsed.Seconds:00}";
+        if (elapsed.TotalMinutes >= 1) return $"{(int)elapsed.TotalMinutes}:{elapsed.Seconds:00}";
+        return $"{elapsed.TotalSeconds:0.0}s";
     }
 }

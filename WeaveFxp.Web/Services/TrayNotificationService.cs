@@ -32,6 +32,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
     private string _windowClass = "";
     private IntPtr _windowHandle;
     private IntPtr _iconHandle;
+    private uint _taskbarCreatedMessage;
     private bool _iconOwned;
     private bool _trayAdded;
     private bool _disposed;
@@ -193,6 +194,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
             WindowProc windowProc = WndProc;
             _windowProc = windowProc;
             _windowClass = "WeaveFxpTray_" + Guid.NewGuid().ToString("N");
+            _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
             var instance = NativeMethods.GetModuleHandle(null);
             var wndClass = new WndClassEx
             {
@@ -210,7 +212,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
             }
 
             var window = NativeMethods.CreateWindowEx(0, _windowClass, "WeaveFXP Tray", 0, 0, 0, 0, 0,
-                NativeMethods.HwndMessage, IntPtr.Zero, instance, IntPtr.Zero);
+                IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
             lock (_gate) _windowHandle = window;
             if (window == IntPtr.Zero)
             {
@@ -256,6 +258,12 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
 
     private IntPtr WndProc(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam)
     {
+        if (_taskbarCreatedMessage != 0 && message == _taskbarCreatedMessage)
+        {
+            _trayAdded = false;
+            AddTrayIcon(hWnd);
+            return IntPtr.Zero;
+        }
         if (message == CallbackMessage)
         {
             var mouseMessage = unchecked((uint)lParam.ToInt64()) & 0xffff;
@@ -350,6 +358,8 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
         if (NativeMethods.ShellNotifyIcon(NotifyIconMessage.Add, ref data))
         {
             _trayAdded = true;
+            data.uVersionOrTimeout = 4;
+            NativeMethods.ShellNotifyIcon(NotifyIconMessage.SetVersion, ref data);
             SetStatus("Tray icon active.");
         }
         else
@@ -388,11 +398,20 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
     {
         lock (_gate)
         {
-            if (!_trayAdded || _windowHandle == IntPtr.Zero) return;
+            if (_windowHandle == IntPtr.Zero) return;
+            if (!_trayAdded)
+            {
+                AddTrayIcon(_windowHandle);
+                return;
+            }
             var data = CreateNotifyIconData(_windowHandle);
             data.uFlags = NotifyIconFlags.Tip;
             data.szTip = BuildTooltip();
-            NativeMethods.ShellNotifyIcon(NotifyIconMessage.Modify, ref data);
+            if (!NativeMethods.ShellNotifyIcon(NotifyIconMessage.Modify, ref data))
+            {
+                _trayAdded = false;
+                AddTrayIcon(_windowHandle);
+            }
         }
     }
 
@@ -516,7 +535,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
         public const uint WmApp = 0x8000;
     }
 
-    private enum NotifyIconMessage : uint { Add = 0, Modify = 1, Delete = 2 }
+    private enum NotifyIconMessage : uint { Add = 0, Modify = 1, Delete = 2, SetVersion = 4 }
     [Flags] private enum NotifyIconFlags : uint { Message = 1, Icon = 2, Tip = 4, Info = 16 }
     [Flags] private enum BalloonIconFlags : uint { Info = 1, Warning = 2, Error = 3, RespectQuietTime = 128 }
     private enum ImageType : uint { Icon = 1 }
@@ -593,6 +612,9 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern ushort RegisterClassEx(ref WndClassEx lpwcx);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern uint RegisterWindowMessage(string message);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern IntPtr CreateWindowEx(uint dwExStyle, string lpClassName, string lpWindowName, uint dwStyle,

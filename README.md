@@ -1,4 +1,4 @@
-# WeaveFXP v1.0.0
+# WeaveFXP v1.0.1
 
 WeaveFXP is a self-hosted FXP client with a dark web UI, a headless transfer
 engine and a JSON API. It is built for site-to-site racing, manual browsing and
@@ -17,9 +17,9 @@ engine runs in the same process.
 
 Choose the release for your machine:
 
-- Windows: `WeaveFXP-v1.0.0-win-x64.zip`
-- Linux PC/server: `WeaveFXP-v1.0.0-linux-x64.zip`
-- Linux ARM64: `WeaveFXP-v1.0.0-linux-arm64.zip`
+- Windows: `WeaveFXP-v1.0.1-win-x64.zip`
+- Linux PC/server: `WeaveFXP-v1.0.1-linux-x64.zip`
+- Linux ARM64: `WeaveFXP-v1.0.1-linux-arm64.zip`
 
 1. Download the release for your platform.
 2. Extract the executable into its own folder, for example `D:\WeaveFXP`.
@@ -118,9 +118,9 @@ The publish scripts create:
 Release\win-x64\WeaveFXP.exe
 Release\linux-x64\WeaveFXP
 Release\linux-arm64\WeaveFXP
-Release\zips\WeaveFXP-v1.0.0-win-x64.zip
-Release\zips\WeaveFXP-v1.0.0-linux-x64.zip
-Release\zips\WeaveFXP-v1.0.0-linux-arm64.zip
+Release\zips\WeaveFXP-v1.0.1-win-x64.zip
+Release\zips\WeaveFXP-v1.0.1-linux-x64.zip
+Release\zips\WeaveFXP-v1.0.1-linux-arm64.zip
 ```
 
 Ship the zip for the target platform. Runtime `data` is not included in release
@@ -141,6 +141,18 @@ set WEAVEFXP_STATE=D:\WeaveFXP\data\state.json
 ```
 
 ## Changelog
+
+### v1.0.1
+
+- Reworked racing around warm shared FTP pools, parallel discovery and lower-overhead live updates.
+- Added SFV coverage, actual raced-file counts and complete per-file race diagnostics.
+- Skipped zero-byte incomplete markers and configured skiplist entries before queueing transfers.
+- Archived completed history beyond the hot JSON limit in SQLite with full details retained.
+- Persisted the recent runtime log to SQLite so log lines survive restarts.
+- Added richer Last hour/traffic stats, active-transfer race stats and direct race navigation.
+- Added local uploads and downloads from the dual-pane browser, with parallel slots and live per-file progress.
+- Preserved retry progress and isolated retry generations from cancelled older workers.
+- Hardened state migration, active-job history cleanup and remote preview memory limits.
 
 ### v1.0.0
 

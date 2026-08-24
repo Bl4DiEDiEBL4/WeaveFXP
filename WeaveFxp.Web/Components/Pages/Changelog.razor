@@ -8,7 +8,7 @@
         <div>
             <div class="eyebrow">Release Notes</div>
             <h2><span class="title-icon">▣</span> Changelog</h2>
-            <p class="page-sub">Current version: v1.0.0</p>
+            <p class="page-sub">Current version: v@(Engine.Version)</p>
         </div>
     </header>
 
@@ -16,13 +16,34 @@
         <section class="doc-hero">
             <div>
                 <span class="doc-kicker">Current build</span>
-                <h2>v1.0.0</h2>
-                <p>First public baseline for the C#/.NET Razor build of WeaveFXP.</p>
+                <h2>v1.0.1</h2>
+                <p>Faster racing, bounded history storage and clearer live transfer diagnostics.</p>
             </div>
         </section>
 
         <section class="timeline">
             <article class="timeline-item current">
+                <div class="timeline-version">v1.0.1</div>
+                <div class="timeline-date">August 2026</div>
+                <ul>
+                    <li>Reworked the race engine around warm, shared FTP connection pools with parallel source discovery and transfer workers.</li>
+                    <li>Reduced hot-path persistence, UI notifications and protocol logging so long-running daemons do not slow down as job history grows.</li>
+                    <li>Moved completed jobs beyond the configurable hot JSON limit into a SQLite history archive while preserving full file and event details.</li>
+                    <li>Persisted the bounded runtime log to SQLite in background batches and restored recent log lines after restart.</li>
+                    <li>Added SFV-driven expected-file coverage, actual raced-file counts and per-file done, dupe, wait, failed and missing diagnostics.</li>
+                    <li>Excluded zero-byte incomplete markers and global/site skiplist matches before they enter race, download or learned X-DUPE work queues.</li>
+                    <li>Improved completion handling so destination dupes and successful transfers update coverage without repeated full destination scans.</li>
+                    <li>Added Last hour stats, traffic chart values and hover details for file and byte counts.</li>
+                    <li>Expanded race progress space and added full transfer statistics to active dashboard rows with direct navigation to the race table.</li>
+                    <li>Added local uploads and downloads from the dual-pane browser, with configurable parallel slots and live per-file progress.</li>
+                    <li>Preserved progress history when retrying jobs and made retries generation-safe so an older cancelled task cannot stop a new attempt.</li>
+                    <li>Prevented history cleanup from deleting active jobs and made partial split-state migrations fall back to legacy state data.</li>
+                    <li>Enforced remote preview size limits while streaming, avoiding oversized files being buffered fully in memory.</li>
+                    <li>Improved API compatibility, HTTPS/UDP listeners, tray notifications and responsive single-line progress layouts.</li>
+                </ul>
+            </article>
+
+            <article class="timeline-item">
                 <div class="timeline-version">v1.0.0</div>
                 <div class="timeline-date">August 2026</div>
                 <ul>

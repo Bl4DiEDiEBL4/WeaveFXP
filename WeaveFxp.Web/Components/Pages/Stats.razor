@@ -1,5 +1,6 @@
 @page "/stats"
 @implements IDisposable
+@using System.Diagnostics
 @inject WeaveEngine Engine
 
 <h1 class="visually-hidden">Stats</h1>
@@ -9,10 +10,11 @@
         <div>
             <div class="eyebrow">Traffic</div>
             <h2><span class="title-icon">◔</span> Stats</h2>
-            <p class="page-sub">Data moved per site — races and downloads. Buckets are hourly, kept for 60 days.</p>
+            <p class="page-sub">Traffic, speed and site balance for races and downloads. Buckets are hourly, kept for 60 days.</p>
         </div>
         <div class="page-actions">
             <select @bind="_rangeHours">
+                <option value="1">Last hour</option>
                 <option value="24">Last 24 hours</option>
                 <option value="168">Last 7 days</option>
                 <option value="720">Last 30 days</option>
@@ -21,63 +23,216 @@
         </div>
     </header>
 
-    <div class="stat-cards">
-        <div class="stat-card">
+    <section class="stats-kpis">
+        <article class="stat-tile primary">
             <div class="stat-label">Moved (@RangeLabel)</div>
-            <div class="stat-value">@HumanSize(TotalOut + TotalIn)</div>
-            <div class="stat-sub">@HumanSize(TotalOut) out · @HumanSize(TotalIn) in</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Files (@RangeLabel)</div>
+            <div class="stat-value">@HumanSize(TotalTraffic)</div>
+            <div class="stat-sub"><span class="dot out"></span>@HumanSize(TotalOut) out <span class="dot in"></span>@HumanSize(TotalIn) in</div>
+        </article>
+        <article class="stat-tile">
+            <div class="stat-label">Files</div>
             <div class="stat-value">@TotalFiles</div>
-            <div class="stat-sub">completed transfers</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Fastest site (@RangeLabel)</div>
-            <div class="stat-value">@(Fastest?.Site ?? "—")</div>
-            <div class="stat-sub">@(Fastest is null ? "no data" : $"{Speed(Fastest.AvgBps)} avg over {Fastest.Files} file(s)")</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">Busiest site (@RangeLabel)</div>
-            <div class="stat-value">@(Busiest?.Site ?? "—")</div>
-            <div class="stat-sub">@(Busiest is null ? "no data" : HumanSize(Busiest.OutBytes + Busiest.InBytes))</div>
-        </div>
-    </div>
+            <div class="stat-sub">@CompletedPerHour files/hour avg</div>
+        </article>
+        <article class="stat-tile">
+            <div class="stat-label">Average speed</div>
+            <div class="stat-value">@Speed(AvgBps)</div>
+            <div class="stat-sub">across completed transfers</div>
+        </article>
+        <article class="stat-tile">
+            <div class="stat-label">Peak bucket</div>
+            <div class="stat-value">@HumanSize(ChartPeak)</div>
+            <div class="stat-sub">per @(RangeHours <= 24 ? "hour" : "day")</div>
+        </article>
+        <article class="stat-tile">
+            <div class="stat-label">Fastest site</div>
+            <div class="stat-value">@(Fastest?.Site ?? "-")</div>
+            <div class="stat-sub">@(Fastest is null ? "no data" : $"{Speed(Fastest.AvgBps)} avg")</div>
+        </article>
+        <article class="stat-tile">
+            <div class="stat-label">Busiest site</div>
+            <div class="stat-value">@(Busiest?.Site ?? "-")</div>
+            <div class="stat-sub">@(Busiest is null ? "no data" : HumanSize(Busiest.TotalBytes))</div>
+        </article>
+        <article class="stat-tile runtime">
+            <div class="stat-label">CPU</div>
+            <div class="stat-value">@_cpuPct.ToString("0.#")%</div>
+            <div class="stat-sub">@Environment.ProcessorCount core(s) · process use</div>
+        </article>
+        <article class="stat-tile runtime">
+            <div class="stat-label">Memory</div>
+            <div class="stat-value">@HumanSize(_workingSetBytes)</div>
+            <div class="stat-sub">@HumanSize(_managedBytes) managed · @_threadCount thread(s)</div>
+        </article>
+    </section>
 
-    <section class="content-panel stats-chart-panel">
-        <h3>Traffic per @(RangeHours <= 24 ? "hour" : "day") <span class="legend"><span class="lg out"></span> out <span class="lg in"></span> in</span></h3>
-        <svg class="traffic-chart" viewBox="0 0 @ChartW @ChartH" preserveAspectRatio="none">
+    <section class="stats-grid">
+        <article class="content-panel stat-panel chart-main">
+            <div class="panel-title-row">
+                <h3>Throughput</h3>
+                <span class="legend"><span class="lg out"></span> out <span class="lg in"></span> in <span class="lg total"></span> total</span>
+            </div>
+            <div class="chart-canvas area-chart-canvas">
+            <svg class="traffic-area-chart" viewBox="0 0 @ChartW @ChartH" preserveAspectRatio="none" role="img" aria-label="Traffic chart">
+                <defs>
+                    <linearGradient id="trafficFill" x1="0" x2="0" y1="0" y2="1">
+                        <stop offset="0%" stop-color="#35f7ee" stop-opacity="0.35" />
+                        <stop offset="100%" stop-color="#35f7ee" stop-opacity="0.02" />
+                    </linearGradient>
+                </defs>
+                @foreach (var y in GridLines)
+                {
+                    <line class="chart-gridline" x1="0" y1="@F(y)" x2="@ChartW" y2="@F(y)" />
+                }
+                @if (ChartBuckets.Any(b => b.Total > 0))
+                {
+                    <path class="area-fill" d="@AreaPath" />
+                    <path class="line-total" d="@LinePath(b => b.Total)" />
+                    <path class="line-out" d="@LinePath(b => b.Out)" />
+                    <path class="line-in" d="@LinePath(b => b.In)" />
+                    @foreach (var p in PointMarkers)
+                    {
+                        <circle class="chart-dot" cx="@F(p.X)" cy="@F(p.Y)" r="3" />
+                    }
+                }
+                @{
+                    var hoverBuckets = ChartBuckets;
+                    var hoverWidth = ChartW / (double)Math.Max(1, hoverBuckets.Count);
+                }
+                @for (var hoverIndex = 0; hoverIndex < hoverBuckets.Count; hoverIndex++)
+                {
+                    var hoverBucket = hoverBuckets[hoverIndex];
+                    <rect class="chart-hover-zone" x="@F(hoverIndex * hoverWidth)" y="0"
+                          width="@F(hoverWidth)" height="@ChartH"
+                          @onmouseenter="() => ShowBucket(hoverBucket, false)"
+                          @onmouseleave="HideBucket" />
+                }
+            </svg>
+            <div class="chart-y-axis" aria-hidden="true">
+                @foreach (var label in AxisLabels(ChartPeak))
+                {
+                    <span>@label</span>
+                }
+            </div>
+            @if (_hoverBucket is not null && !_hoverIsBars)
+            {
+                <div class="chart-tooltip">@BucketTooltipContent(_hoverBucket)</div>
+            }
+            </div>
+            @{
+                var throughputAxisBuckets = ChartBuckets;
+            }
+            <div class="chart-axis-labels" style="grid-template-columns: repeat(@Math.Max(1, throughputAxisBuckets.Count), minmax(0, 1fr));">
+                @for (var axisIndex = 0; axisIndex < throughputAxisBuckets.Count; axisIndex++)
+                {
+                    <span>@(axisIndex % LabelEvery == 0 ? throughputAxisBuckets[axisIndex].Label : "")</span>
+                }
+            </div>
+            <div class="chart-foot">
+                <span>@ChartBuckets.Count bucket(s)</span>
+                <span>peak @HumanSize(ChartPeak)</span>
+            </div>
+        </article>
+
+        <article class="content-panel stat-panel site-rank-panel">
+            <div class="panel-title-row">
+                <h3>Site balance</h3>
+                <span class="hint">@PerSite.Count site(s)</span>
+            </div>
+            <div class="site-ranks">
+                @if (PerSite.Count == 0)
+                {
+                    <div class="empty-row compact">No traffic recorded yet</div>
+                }
+                @foreach (var site in PerSite.Take(8))
+                {
+                    <div class="site-rank" title="@SiteTooltip(site)">
+                        <div class="site-rank-head">
+                            <strong>@site.Site</strong>
+                            <span>@HumanSize(site.TotalBytes)</span>
+                        </div>
+                        <div class="stack-bar">
+                            <span class="stack-out" style="width:@site.OutShareOfAll%"></span>
+                            <span class="stack-in" style="width:@site.InShareOfAll%"></span>
+                        </div>
+                        <div class="site-rank-meta">
+                            <span>@HumanSize(site.OutBytes) out</span>
+                            <span>@HumanSize(site.InBytes) in</span>
+                            <span>@Speed(site.AvgBps)</span>
+                        </div>
+                    </div>
+                }
+            </div>
+        </article>
+    </section>
+
+    <section class="content-panel stat-panel">
+        <div class="panel-title-row">
+            <h3>Traffic per @(RangeHours <= 24 ? "hour" : "day")</h3>
+            <span class="legend"><span class="lg out"></span> out <span class="lg in"></span> in</span>
+        </div>
+        <div class="chart-canvas bar-chart-canvas">
+        <svg class="traffic-bar-chart" viewBox="0 0 @ChartW @BarChartH" preserveAspectRatio="none" role="img" aria-label="Traffic bars">
             @{
                 var buckets = ChartBuckets;
                 var max = Math.Max(1, buckets.Max(b => Math.Max(b.Out, b.In)));
                 var bw = (double)ChartW / Math.Max(1, buckets.Count);
                 var i = 0;
             }
+            @foreach (var y in BarGridLines)
+            {
+                <line class="chart-gridline" x1="0" y1="@F(y)" x2="@ChartW" y2="@F(y)" />
+            }
             @foreach (var b in buckets)
             {
                 var x = i * bw;
-                var hOut = b.Out * (ChartH - 18.0) / max;
-                var hIn = b.In * (ChartH - 18.0) / max;
-                <rect class="bar-out" x="@F(x + bw * 0.12)" y="@F(ChartH - 14 - hOut)" width="@F(bw * 0.34)" height="@F(Math.Max(hOut, b.Out > 0 ? 1 : 0))" />
-                <rect class="bar-in" x="@F(x + bw * 0.52)" y="@F(ChartH - 14 - hIn)" width="@F(bw * 0.34)" height="@F(Math.Max(hIn, b.In > 0 ? 1 : 0))" />
-                if (i % LabelEvery == 0)
-                {
-                    @((MarkupString)$"<text class=\"axis\" x=\"{F(x + bw * 0.5)}\" y=\"{ChartH - 3}\" text-anchor=\"middle\">{System.Net.WebUtility.HtmlEncode(b.Label)}</text>")
-                }
+                var outH = b.Out * (BarChartH - 22.0) / max;
+                var inH = b.In * (BarChartH - 22.0) / max;
+                var outY = BarChartH - 18 - outH;
+                var inY = BarChartH - 18 - inH;
+                var barW = Math.Max(3, bw * 0.28);
+                <rect class="bar-out" x="@F(x + bw * 0.18)" y="@F(outY)" width="@F(barW)" height="@F(Math.Max(outH, b.Out > 0 ? 1 : 0))" rx="2" />
+                <rect class="bar-in" x="@F(x + bw * 0.52)" y="@F(inY)" width="@F(barW)" height="@F(Math.Max(inH, b.In > 0 ? 1 : 0))" rx="2" />
+                <rect class="chart-hover-zone" x="@F(x)" y="0" width="@F(bw)" height="@BarChartH"
+                      @onmouseenter="() => ShowBucket(b, true)" @onmouseleave="HideBucket" />
                 i++;
             }
         </svg>
-        <div class="chart-max">peak: @HumanSize(ChartPeak)/@(RangeHours <= 24 ? "hour" : "day")</div>
+        <div class="chart-y-axis" aria-hidden="true">
+            @foreach (var label in AxisLabels(BarPeak))
+            {
+                <span>@label</span>
+            }
+        </div>
+        @if (_hoverBucket is not null && _hoverIsBars)
+        {
+            <div class="chart-tooltip">@BucketTooltipContent(_hoverBucket)</div>
+        }
+        </div>
+        @{
+            var barAxisBuckets = ChartBuckets;
+        }
+        <div class="chart-axis-labels" style="grid-template-columns: repeat(@Math.Max(1, barAxisBuckets.Count), minmax(0, 1fr));">
+            @for (var axisIndex = 0; axisIndex < barAxisBuckets.Count; axisIndex++)
+            {
+                <span>@(axisIndex % LabelEvery == 0 ? barAxisBuckets[axisIndex].Label : "")</span>
+            }
+        </div>
     </section>
 
-    <section class="content-panel">
+    <section class="content-panel stat-panel">
+        <div class="panel-title-row">
+            <h3>Sites</h3>
+            <span class="hint">sorted by total traffic</span>
+        </div>
         <div class="table-wrap">
-            <table class="data-table">
+            <table class="data-table stats-table">
                 <thead>
                     <tr>
                         <th>Site</th>
                         <th>Out (@RangeLabel)</th>
                         <th>In (@RangeLabel)</th>
+                        <th>Total</th>
                         <th>Files</th>
                         <th>Avg speed</th>
                         <th>Share</th>
@@ -86,7 +241,7 @@
                 <tbody>
                     @if (PerSite.Count == 0)
                     {
-                        <tr><td colspan="6" class="dim">No traffic recorded yet — race or download something.</td></tr>
+                        <tr><td colspan="7" class="dim">No traffic recorded yet. Race or download something.</td></tr>
                     }
                     @foreach (var s in PerSite)
                     {
@@ -94,9 +249,10 @@
                             <td class="strong">@s.Site</td>
                             <td class="mono">@HumanSize(s.OutBytes)</td>
                             <td class="mono">@HumanSize(s.InBytes)</td>
+                            <td class="mono">@HumanSize(s.TotalBytes)</td>
                             <td class="mono">@s.Files</td>
-                            <td class="mono">@(s.AvgBps > 0 ? Speed(s.AvgBps) : "—")</td>
-                            <td class="col-share">
+                            <td class="mono">@(s.AvgBps > 0 ? Speed(s.AvgBps) : "-")</td>
+                            <td class="col-share" title="@SiteTooltip(s)">
                                 <span class="job-bar share-bar"><span class="job-bar-fill" style="width:@s.SharePct%"></span></span>
                                 <span class="mono dim">@s.SharePct%</span>
                             </td>
@@ -110,28 +266,84 @@
 
 @code {
     private const int ChartW = 1000;
-    private const int ChartH = 180;
+    private const int ChartH = 260;
+    private const int BarChartH = 160;
 
     private List<SiteHourStat> _stats = new();
     private int _rangeHours = 24;
+    private readonly Process _process = Process.GetCurrentProcess();
+    private CancellationTokenSource? _metricsCts;
+    private DateTime _lastMetricSampleUtc;
+    private TimeSpan _lastCpuTime;
+    private double _cpuPct;
+    private long _workingSetBytes;
+    private long _managedBytes;
+    private int _threadCount;
+    private ChartBucket? _hoverBucket;
+    private bool _hoverIsBars;
 
     private int RangeHours => _rangeHours;
-    private string RangeLabel => _rangeHours switch { 24 => "24h", 168 => "7d", _ => "30d" };
+    private string RangeLabel => _rangeHours switch { 1 => "1h", 24 => "24h", 168 => "7d", _ => "30d" };
     private int LabelEvery => _rangeHours <= 24 ? 3 : (_rangeHours <= 168 ? 1 : 5);
 
     protected override void OnInitialized()
     {
         Refresh();
+        SampleRuntimeMetrics();
+        _metricsCts = new CancellationTokenSource();
+        _ = RunMetricsLoopAsync(_metricsCts.Token);
         Engine.Changed += OnChanged;
     }
 
-    public void Dispose() => Engine.Changed -= OnChanged;
+    public void Dispose()
+    {
+        Engine.Changed -= OnChanged;
+        _metricsCts?.Cancel();
+        _metricsCts?.Dispose();
+        _process.Dispose();
+    }
 
     private void OnChanged() => _ = InvokeAsync(() => { Refresh(); StateHasChanged(); });
 
     private void Refresh() => _stats = Engine.SiteStats();
 
-    private static string F(double v) => v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+    private async Task RunMetricsLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                await InvokeAsync(() =>
+                {
+                    SampleRuntimeMetrics();
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void SampleRuntimeMetrics()
+    {
+        var now = DateTime.UtcNow;
+        _process.Refresh();
+        var cpu = _process.TotalProcessorTime;
+        if (_lastMetricSampleUtc != default)
+        {
+            var wall = (now - _lastMetricSampleUtc).TotalMilliseconds;
+            var cpuMs = (cpu - _lastCpuTime).TotalMilliseconds;
+            if (wall > 1)
+                _cpuPct = Math.Clamp(cpuMs / wall / Math.Max(1, Environment.ProcessorCount) * 100.0, 0, 100);
+        }
+        _lastMetricSampleUtc = now;
+        _lastCpuTime = cpu;
+        _workingSetBytes = _process.WorkingSet64;
+        _managedBytes = GC.GetTotalMemory(false);
+        _threadCount = _process.Threads.Count;
+    }
 
     private List<SiteHourStat> InRange => _stats
         .Where(b => b.HourUtc >= DateTime.UtcNow.AddHours(-_rangeHours))
@@ -139,7 +351,11 @@
 
     private long TotalOut => InRange.Sum(b => b.OutBytes);
     private long TotalIn => InRange.Sum(b => b.InBytes);
+    private long TotalTraffic => TotalOut + TotalIn;
     private int TotalFiles => InRange.Sum(b => b.Files);
+    private double TotalSeconds => InRange.Sum(b => b.Seconds);
+    private double AvgBps => TotalSeconds > 0.5 ? TotalTraffic / TotalSeconds : 0;
+    private string CompletedPerHour => RangeHours > 0 ? (TotalFiles / (double)RangeHours).ToString("0.##") : "0";
 
     private sealed class SiteAgg
     {
@@ -148,8 +364,11 @@
         public long InBytes;
         public int Files;
         public double Seconds;
-        public double AvgBps => Seconds > 0.5 ? (OutBytes + InBytes) / Seconds : 0;
+        public long TotalBytes => OutBytes + InBytes;
+        public double AvgBps => Seconds > 0.5 ? TotalBytes / Seconds : 0;
         public int SharePct;
+        public int OutShareOfAll;
+        public int InShareOfAll;
     }
 
     private List<SiteAgg> PerSite
@@ -166,10 +385,16 @@
                     Files = g.Sum(x => x.Files),
                     Seconds = g.Sum(x => x.Seconds),
                 })
-                .OrderByDescending(s => s.OutBytes + s.InBytes)
+                .OrderByDescending(s => s.TotalBytes)
                 .ToList();
-            var total = Math.Max(1, list.Sum(s => s.OutBytes + s.InBytes));
-            foreach (var s in list) s.SharePct = (int)((s.OutBytes + s.InBytes) * 100 / total);
+
+            var total = Math.Max(1, list.Sum(s => s.TotalBytes));
+            foreach (var s in list)
+            {
+                s.SharePct = (int)Math.Round(s.TotalBytes * 100.0 / total);
+                s.OutShareOfAll = (int)Math.Round(s.OutBytes * 100.0 / total);
+                s.InShareOfAll = (int)Math.Round(s.InBytes * 100.0 / total);
+            }
             return list;
         }
     }
@@ -177,7 +402,12 @@
     private SiteAgg? Fastest => PerSite.Where(s => s.AvgBps > 0).OrderByDescending(s => s.AvgBps).FirstOrDefault();
     private SiteAgg? Busiest => PerSite.FirstOrDefault();
 
-    private sealed record ChartBucket(string Label, long Out, long In);
+    private sealed record ChartBucket(string Label, long Out, long In, int Files)
+    {
+        public long Total => Out + In;
+    }
+
+    private sealed record ChartPoint(double X, double Y);
 
     private List<ChartBucket> ChartBuckets
     {
@@ -191,7 +421,7 @@
                 {
                     var hour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc).AddHours(-h);
                     var slice = _stats.Where(b => b.HourUtc == hour);
-                    result.Add(new ChartBucket(hour.ToLocalTime().ToString("HH"), slice.Sum(b => b.OutBytes), slice.Sum(b => b.InBytes)));
+                    result.Add(new ChartBucket(hour.ToLocalTime().ToString("HH:mm"), slice.Sum(b => b.OutBytes), slice.Sum(b => b.InBytes), slice.Sum(b => b.Files)));
                 }
             }
             else
@@ -201,14 +431,107 @@
                 {
                     var day = now.Date.AddDays(-d);
                     var slice = _stats.Where(b => b.HourUtc >= day && b.HourUtc < day.AddDays(1));
-                    result.Add(new ChartBucket(day.ToLocalTime().ToString("dd/MM"), slice.Sum(b => b.OutBytes), slice.Sum(b => b.InBytes)));
+                    result.Add(new ChartBucket(day.ToLocalTime().ToString("dd/MM"), slice.Sum(b => b.OutBytes), slice.Sum(b => b.InBytes), slice.Sum(b => b.Files)));
                 }
             }
             return result;
         }
     }
 
-    private long ChartPeak => ChartBuckets.Count == 0 ? 0 : ChartBuckets.Max(b => Math.Max(b.Out, b.In));
+    private long ChartPeak => ChartBuckets.Count == 0 ? 0 : ChartBuckets.Max(b => b.Total);
+    private long BarPeak => ChartBuckets.Count == 0 ? 0 : ChartBuckets.Max(b => Math.Max(b.Out, b.In));
+
+    private IEnumerable<double> GridLines
+    {
+        get
+        {
+            for (var i = 1; i <= 4; i++) yield return i * (ChartH - 24.0) / 5.0;
+        }
+    }
+
+    private IEnumerable<double> BarGridLines
+    {
+        get
+        {
+            for (var i = 0; i <= 4; i++) yield return 4 + i * (BarChartH - 22.0) / 4.0;
+        }
+    }
+
+    private IEnumerable<ChartPoint> PointMarkers => Points(b => b.Total)
+        .Where((_, i) => i == 0 || i == ChartBuckets.Count - 1 || i % Math.Max(1, LabelEvery * 2) == 0);
+
+    private string AreaPath
+    {
+        get
+        {
+            var pts = Points(b => b.Total).ToList();
+            if (pts.Count == 0) return "";
+            return $"{LinePath(pts)} L {F(pts[^1].X)} {ChartH - 18} L {F(pts[0].X)} {ChartH - 18} Z";
+        }
+    }
+
+    private string LinePath(Func<ChartBucket, long> value) => LinePath(Points(value));
+
+    private string LinePath(IEnumerable<ChartPoint> points)
+    {
+        var pts = points.ToList();
+        if (pts.Count == 0) return "";
+        return "M " + string.Join(" L ", pts.Select(p => $"{F(p.X)} {F(p.Y)}"));
+    }
+
+    private IEnumerable<ChartPoint> Points(Func<ChartBucket, long> value)
+    {
+        var buckets = ChartBuckets;
+        var max = Math.Max(1, buckets.Max(b => b.Total));
+        var step = buckets.Count <= 1 ? ChartW : ChartW / (double)(buckets.Count - 1);
+        for (var i = 0; i < buckets.Count; i++)
+        {
+            var x = i * step;
+            var y = ChartH - 18 - value(buckets[i]) * (ChartH - 34.0) / max;
+            yield return new ChartPoint(x, y);
+        }
+    }
+
+    private static string F(double v) => v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string BucketTooltip(ChartBucket bucket) =>
+        $"{bucket.Label} | Files: {bucket.Files:N0} | Out: {HumanSize(bucket.Out)} | In: {HumanSize(bucket.In)} | Total: {HumanSize(bucket.Total)}";
+
+    private static IEnumerable<string> AxisLabels(long peak)
+    {
+        for (var i = 4; i >= 0; i--)
+            yield return HumanSize((long)(peak * (i / 4.0)));
+    }
+
+    private void ShowBucket(ChartBucket bucket, bool bars)
+    {
+        _hoverBucket = bucket;
+        _hoverIsBars = bars;
+    }
+
+    private void HideBucket() => _hoverBucket = null;
+
+    private static RenderFragment BucketTooltipContent(ChartBucket bucket) => builder =>
+    {
+        var seq = 0;
+        builder.OpenElement(seq++, "strong"); builder.AddContent(seq++, bucket.Label); builder.CloseElement();
+        foreach (var item in new[]
+        {
+            ("Files", bucket.Files.ToString("N0")),
+            ("Out", HumanSize(bucket.Out)),
+            ("In", HumanSize(bucket.In)),
+            ("Total", HumanSize(bucket.Total)),
+        })
+        {
+            builder.OpenElement(seq++, "div");
+            builder.OpenElement(seq++, "span"); builder.AddContent(seq++, item.Item1); builder.CloseElement();
+            builder.OpenElement(seq++, "b"); builder.AddContent(seq++, item.Item2); builder.CloseElement();
+            builder.CloseElement();
+        }
+    };
+
+    private static string SiteTooltip(SiteAgg site) =>
+        $"{site.Site} | Files: {site.Files:N0} | Out: {HumanSize(site.OutBytes)} | In: {HumanSize(site.InBytes)} | Total: {HumanSize(site.TotalBytes)} | Avg: {Speed(site.AvgBps)}";
 
     private static string HumanSize(long bytes)
     {
@@ -222,7 +545,7 @@
 
     private static string Speed(double bps)
     {
-        if (bps <= 0) return "";
+        if (bps <= 0) return "-";
         string[] units = { "B/s", "KB/s", "MB/s", "GB/s" };
         var v = bps;
         var u = 0;

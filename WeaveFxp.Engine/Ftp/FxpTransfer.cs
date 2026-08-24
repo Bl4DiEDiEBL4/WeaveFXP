@@ -13,6 +13,12 @@ public static class FxpTransfer
 {
     private const int MaxDepth = 16;
 
+    private sealed class DirtyControlChannelException : IOException
+    {
+        public DirtyControlChannelException(Exception inner)
+            : base(inner.Message, inner) { }
+    }
+
     public delegate void Logger(string level, string message);
 
     public static async Task TransferAsync(FtpClient.Config source, FtpClient.Config dest,
@@ -149,6 +155,17 @@ public static class FxpTransfer
     // Same dupe/-missing classification the dir walk uses, exposed for the race loop.
     public static bool IsSkippableTransferError(Exception ex) => IsDupeOrMissing(ex);
 
+    // Unlike source-side "not found" / -missing replies, these responses confirm that
+    // the attempted file already exists on the destination and may satisfy SFV coverage.
+    public static bool IsDestinationDupeError(Exception ex)
+    {
+        var m = ex.Message ?? "";
+        return m.Contains("x-dupe", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool RequiresConnectionDrop(Exception ex) => ex is DirtyControlChannelException;
+
     // The file exists on source but isn't finished uploading yet (glftpd:
     // "No Permission To Download A File Currently Being Uploaded"). Not an error —
     // just come back for it next poll without burning a retry attempt.
@@ -156,15 +173,29 @@ public static class FxpTransfer
     {
         var m = ex.Message ?? "";
         return m.Contains("currently being uploaded", StringComparison.OrdinalIgnoreCase)
-            || m.Contains("being uploaded", StringComparison.OrdinalIgnoreCase);
+            || m.Contains("being uploaded", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("upload already in progress", StringComparison.OrdinalIgnoreCase)   // weaveftpd
+            || m.Contains("upload in progress", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("retry later", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("No available slave for upcoming transfer", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("File not found on any slave", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("PRET RETR target not found", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task TransferFileAsync(FtpClient src, FtpClient dst, FtpClient.Config destCfg,
         string srcPath, string dstPath, Logger log, CancellationToken ct, SemaphoreSlim? dataGate = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var storeCommand = "STOR " + dstPath;
-        var retrieveCommand = "RETR " + srcPath;
+        // cbftp-style addressing: CWD into the dir, then STOR/RETR the BARE filename.
+        // Absolute paths through a symlinked section ("/!0day_today./Rel/file.rar") are
+        // not resolved by every daemon on STOR/RETR/PRET, while CWD always is (cbftp
+        // checks getCurrentPath() != transferpath and CWDs before every transfer). The
+        // CWD is a no-op after the first file of a release (per-conn dir tracking).
+        var storeCommand = "STOR " + RemoteName(dstPath);
+        var retrieveCommand = "RETR " + RemoteName(srcPath);
+        await Task.WhenAll(
+            dst.EnsureCwdAsync(RemoteDir(dstPath)),
+            src.EnsureCwdAsync(RemoteDir(srcPath))).ConfigureAwait(false);
         // Two different control connections — run the PRETs concurrently.
         await Task.WhenAll(
             dst.MaybePretAsync(storeCommand),
@@ -223,7 +254,12 @@ public static class FxpTransfer
         }
         catch when (passiveCommand == "CPSV")
         {
-            log("warn", "CPSV failed, falling back to regular passive FXP");
+            // CPSV would have made the passive side the TLS client. Falling back to a
+            // plain PASV WITHOUT re-arming the roles leaves BOTH daemons acting as TLS
+            // server on the data channel — a guaranteed handshake deadlock that hangs
+            // this slot for tens of seconds. Re-arm the orientation via SSCN first.
+            log("warn", "CPSV failed, falling back to PASV with SSCN roles");
+            await Task.WhenAll(src.SetSscnAsync(srcIsTlsClient), dst.SetSscnAsync(!srcIsTlsClient)).ConfigureAwait(false);
             (ep, method) = await passiveClient.EnterPassiveAsync("").ConfigureAwait(false);
         }
         log("info", $"{(srcPassive ? "source" : "destination")} entered {method} at {ep.Host}:{ep.Port}");
@@ -246,31 +282,25 @@ public static class FxpTransfer
         await passiveClient.BeginStartCommandAsync(passiveCmd).ConfigureAwait(false);
         await activeClient.BeginStartCommandAsync(activeCmd).ConfigureAwait(false);
 
-        Exception? passiveErr = null, activeErr = null;
-        var passiveStarted = false; var activeStarted = false;
-        try { var (c, _) = await passiveClient.FinishStartCommandAsync().ConfigureAwait(false); passiveStarted = c / 100 == 1; }
-        catch (Exception ex) { passiveErr = ex; }
-        try { var (c, _) = await activeClient.FinishStartCommandAsync().ConfigureAwait(false); activeStarted = c / 100 == 1; }
-        catch (Exception ex) { activeErr = ex; }
-
-        if (passiveErr is not null || activeErr is not null)
+        var passiveReply = passiveClient.FinishStartCommandAsync();
+        var activeReply = activeClient.FinishStartCommandAsync();
+        var firstReply = await Task.WhenAny(passiveReply, activeReply).ConfigureAwait(false);
+        try
         {
-            // One side refused (dupe, permissions, …) while the other may already be
-            // mid-transfer-start — abort the survivor so its control channel is clean
-            // before these connections go back to the pool.
-            var original = passiveErr ?? activeErr;
-            try
-            {
-                if (passiveErr is not null && activeStarted) await activeClient.AbortTransferAsync().ConfigureAwait(false);
-                if (activeErr is not null && passiveStarted) await passiveClient.AbortTransferAsync().ConfigureAwait(false);
-            }
-            catch (Exception abortEx)
-            {
-                // Couldn't restore the channel — surface a non-skippable error so the
-                // caller drops these connections instead of reusing them desynced.
-                throw new IOException($"transfer aborted uncleanly ({FirstLine(original!.Message)}; {FirstLine(abortEx.Message)})", original);
-            }
-            throw original!;
+            await firstReply.ConfigureAwait(false);
+            await Task.WhenAll(passiveReply, activeReply).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // One peer can reject STOR immediately while the other peer waits for a data
+            // socket before sending its preliminary reply. Reading these replies in a
+            // fixed order hid that rejection until the control timeout. Stop waiting as
+            // soon as either side refuses and observe any later background fault.
+            _ = passiveReply.ContinueWith(t => _ = t.Exception,
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            _ = activeReply.ContinueWith(t => _ = t.Exception,
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            throw new DirtyControlChannelException(ex);
         }
         log("info", $"transferring {srcPath} -> {dstPath}");
 
@@ -326,7 +356,7 @@ public static class FxpTransfer
             var i = line.IndexOf("X-DUPE:", StringComparison.OrdinalIgnoreCase);
             if (i < 0) continue;
             var name = line[(i + 7)..].Trim();
-            if (name.Length > 0) result.Add(name);
+            if (name.Length > 0 && !IsIncompleteMarker(name)) result.Add(name);
         }
         return result;
     }
@@ -352,6 +382,15 @@ public static class FxpTransfer
         if (path.Length == 0) return "";
         var i = path.LastIndexOf('/');
         return i >= 0 ? path[(i + 1)..] : path;
+    }
+
+    private static string RemoteName(string path) => RemoteBase(path);
+
+    private static string RemoteDir(string path)
+    {
+        path = (path ?? "").Trim().Replace('\\', '/').TrimEnd('/');
+        var i = path.LastIndexOf('/');
+        return i <= 0 ? "/" : path[..i];
     }
 
     private static List<string> MergeSkiplists(FtpClient src, FtpClient dst)
@@ -439,14 +478,12 @@ public static class FxpTransfer
         => (name ?? "").TrimEnd().EndsWith("-missing", StringComparison.OrdinalIgnoreCase);
 
     // Errors that mean "nothing to do here, keep going" during a race: the dest
-    // already has the file (X-DUPE / already exists), the dest rejects a -missing
-    // marker, or the source piece is not actually present.
+    // already has the file (X-DUPE / already exists), or the dest rejects a
+    // non-transferable marker. Temporary source/slave misses are retried instead.
     private static bool IsDupeOrMissing(Exception ex)
     {
         var m = ex.Message ?? "";
-        return m.Contains("x-dupe", StringComparison.OrdinalIgnoreCase)
-            || m.Contains("already exists", StringComparison.OrdinalIgnoreCase)
-            || m.Contains("PRET RETR target not found", StringComparison.OrdinalIgnoreCase)
+        return IsDestinationDupeError(ex)
             || m.Contains("-missing", StringComparison.OrdinalIgnoreCase)
             || m.Contains("not allowed here", StringComparison.OrdinalIgnoreCase);
     }

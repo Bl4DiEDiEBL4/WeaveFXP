@@ -2,7 +2,8 @@
 
 <section class="pane @(Pane.Loaded ? "" : "")">
     <div class="pane-head">
-        <select class="pane-site" value="@Pane.Site" @onchange="OnSiteChange">
+        <button type="button" class="secondary icon-btn local-toggle @(IsLocal ? "active" : "")" title="@(IsLocal ? "Switch this browse back to sites" : "Switch this browse to local files")" @onclick="() => OnLocal.InvokeAsync()">▣</button>
+        <select class="pane-site" value="@(IsLocal ? "" : Pane.Site)" @onchange="OnSiteChange">
             <option value="">— site —</option>
             @foreach (var s in Sites)
             {
@@ -28,23 +29,23 @@
 
     <div class="pane-nav">
         <select class="pane-section" @onchange="OnSectionChange">
-            <option value="">Section</option>
-            @foreach (var sec in SectionsFor())
+            <option value="">@(IsLocal ? "Drives" : "Section")</option>
+            @foreach (var item in NavOptions())
             {
-                <option value="@sec.Section">@sec.Name</option>
+                <option value="@item.Value">@item.Label</option>
             }
         </select>
         <button class="secondary icon-btn" title="Parent directory" @onclick="() => OnUp.InvokeAsync()">⇧</button>
         <input class="pane-path" value="@Pane.Path" @onchange="OnPathChange" spellcheck="false" />
         <button class="secondary icon-btn" title="Go" @onclick="() => OnGo.InvokeAsync()">➜</button>
         <button class="secondary icon-btn" title="Refresh" @onclick="() => OnGo.InvokeAsync()">↻</button>
-        <button class="secondary slim" title="SFV / completion check" @onclick="() => OnSfv.InvokeAsync()">
-            <span class="btn-icon">✓</span>
-            SFV
+        <button class="secondary slim" title="Compare both browses" @onclick="() => OnCompare.InvokeAsync()">
+            <span class="btn-icon">≋</span>
+            Compare
         </button>
-        <button class="secondary slim" title="Download selected locally" @onclick="() => OnDownload.InvokeAsync()">
-            <span class="btn-icon">⇩</span>
-            DL
+        <button class="secondary slim" title="@(IsLocal ? "Upload selected to the other browse" : "Download selected locally")" @onclick="() => OnDownload.InvokeAsync()">
+            <span class="btn-icon">@(IsLocal ? "⇧" : "⇩")</span>
+            @(IsLocal ? "UL" : "DL")
         </button>
     </div>
 
@@ -54,34 +55,60 @@
         <table class="listing">
             <thead>
                 <tr>
-                    <th class="col-name"><button class="sort-head" @onclick='() => OnSort.InvokeAsync("name")'>Name @SortMark("name")</button></th>
-                    <th class="col-size"><button class="sort-head" @onclick='() => OnSort.InvokeAsync("size")'>Size @SortMark("size")</button></th>
-                    <th class="col-date"><button class="sort-head" @onclick='() => OnSort.InvokeAsync("modified")'>Modified @SortMark("modified")</button></th>
+                    @foreach (var column in Columns())
+                    {
+                        <th class="@ColumnClass(column)"
+                            draggable="true"
+                            title="Drag column to move"
+                            @ondragstart="() => StartColumnDrag(column)"
+                            @ondragover:preventDefault="true"
+                            @ondrop="() => DropColumn(column)">
+                            <button class="sort-head draggable-head" @onclick="() => OnSort.InvokeAsync(column)">@ColumnTitle(column) @SortMark(column)</button>
+                        </th>
+                    }
                 </tr>
             </thead>
             <tbody>
-                @if (Pane.Path != "/")
+                @if (ShowParent)
                 {
                     <tr class="updir" @ondblclick="() => OnUp.InvokeAsync()"
                         @oncontextmenu="e => OnContext.InvokeAsync((-1, e))"
                         @oncontextmenu:preventDefault="true"
                         @oncontextmenu:stopPropagation="true">
-                        <td class="col-name"><span class="icon">📁</span> ..</td><td class="col-size"></td><td class="col-date"></td>
+                        @foreach (var column in Columns())
+                        {
+                            <td class="@ColumnClass(column)">
+                                @if (column == "name")
+                                {
+                                    <span class="icon">📁</span><span> ..</span>
+                                }
+                            </td>
+                        }
                     </tr>
                 }
                 @for (var i = 0; i < Pane.Entries.Count; i++)
                 {
                     var index = i;
                     var entry = Pane.Entries[i];
-                    <tr class="entry @(entry.Type == "dir" ? "is-dir" : "") @(Pane.Selected.Contains(index) ? "selected" : "")"
+                    <tr class="entry @(entry.Type == "dir" ? "is-dir" : "") @(Pane.Selected.Contains(index) ? "selected" : "") @CompareClass(entry)"
                         @onclick="e => OnSelect.InvokeAsync((index, e))"
                         @ondblclick="() => OnOpen.InvokeAsync(index)"
                         @oncontextmenu="e => OnContext.InvokeAsync((index, e))"
                         @oncontextmenu:preventDefault="true"
                         @oncontextmenu:stopPropagation="true">
-                        <td class="col-name"><span class="icon">@Icon(entry.Type)</span> @entry.Name</td>
-                        <td class="col-size">@(entry.Type == "dir" ? "" : HumanSize(entry.Size))</td>
-                        <td class="col-date">@(entry.Modified.Year > 1 ? entry.Modified.ToLocalTime().ToString("g") : "")</td>
+                        @foreach (var column in Columns())
+                        {
+                            <td class="@ColumnClass(column)" title="@CellTitle(entry, column)">
+                                @if (column == "name")
+                                {
+                                    <span class="icon">@Icon(entry.Type)</span><span> @entry.Name</span>
+                                }
+                                else
+                                {
+                                    @CellText(entry, column)
+                                }
+                            </td>
+                        }
                     </tr>
                 }
             </tbody>
@@ -106,6 +133,8 @@
 @code {
     [Parameter] public PaneModel Pane { get; set; } = new();
     [Parameter] public List<Site> Sites { get; set; } = new();
+    [Parameter] public IReadOnlyList<string> LocalRoots { get; set; } = Array.Empty<string>();
+    [Parameter] public EventCallback OnLocal { get; set; }
     [Parameter] public EventCallback<string> OnSiteSelected { get; set; }
     [Parameter] public EventCallback<string> OnSectionSelected { get; set; }
     [Parameter] public EventCallback<string> OnPathChanged { get; set; }
@@ -113,24 +142,115 @@
     [Parameter] public EventCallback OnDisconnect { get; set; }
     [Parameter] public EventCallback OnUp { get; set; }
     [Parameter] public EventCallback OnGo { get; set; }
-    [Parameter] public EventCallback OnSfv { get; set; }
+    [Parameter] public EventCallback OnCompare { get; set; }
     [Parameter] public EventCallback OnDownload { get; set; }
     [Parameter] public EventCallback<int> OnOpen { get; set; }
     [Parameter] public EventCallback<(int, MouseEventArgs)> OnSelect { get; set; }
     [Parameter] public EventCallback<string> OnSort { get; set; }
+    [Parameter] public EventCallback OnColumnsChanged { get; set; }
     [Parameter] public EventCallback<(int, MouseEventArgs)> OnContext { get; set; }
+
+    private static readonly string[] DefaultColumns = { "name", "owner", "group", "size", "modified" };
+    private string _dragColumn = "";
 
     private Task OnSiteChange(ChangeEventArgs e) => OnSiteSelected.InvokeAsync(e.Value?.ToString() ?? "");
     private Task OnSectionChange(ChangeEventArgs e) => OnSectionSelected.InvokeAsync(e.Value?.ToString() ?? "");
     private Task OnPathChange(ChangeEventArgs e) => OnPathChanged.InvokeAsync(e.Value?.ToString() ?? "/");
+    private bool IsLocal => Pane.Site.Equals("local", StringComparison.OrdinalIgnoreCase);
+    private bool ShowParent => !(IsLocal && string.IsNullOrWhiteSpace(Pane.Path)) && Pane.Path != "/";
 
-    private IEnumerable<SiteSection> SectionsFor()
+    private IEnumerable<(string Label, string Value)> NavOptions()
     {
+        if (IsLocal)
+            return LocalRoots.Select(root => (root.TrimEnd('\\', '/').Length == 0 ? root : root.TrimEnd('\\', '/'), root));
         var site = Sites.FirstOrDefault(s => s.Name == Pane.Site);
-        return site?.Sections ?? Enumerable.Empty<SiteSection>();
+        return (site?.Sections ?? Enumerable.Empty<SiteSection>()).Select(s => (s.Name, s.Section));
     }
 
     private static string Icon(string type) => type switch { "dir" => "📁", "link" => "🔗", _ => "📄" };
+
+    private IReadOnlyList<string> Columns()
+    {
+        NormalizeColumns();
+        return Pane.ColumnOrder;
+    }
+
+    private void NormalizeColumns()
+    {
+        Pane.ColumnOrder ??= new List<string>();
+        Pane.ColumnOrder = Pane.ColumnOrder
+            .Where(c => DefaultColumns.Contains(c, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        foreach (var column in DefaultColumns)
+            if (!Pane.ColumnOrder.Contains(column, StringComparer.OrdinalIgnoreCase))
+                Pane.ColumnOrder.Add(column);
+    }
+
+    private void StartColumnDrag(string column) => _dragColumn = column;
+
+    private async Task DropColumn(string target)
+    {
+        if (string.IsNullOrWhiteSpace(_dragColumn) || _dragColumn.Equals(target, StringComparison.OrdinalIgnoreCase))
+            return;
+        NormalizeColumns();
+        var sourceIndex = Pane.ColumnOrder.FindIndex(c => c.Equals(_dragColumn, StringComparison.OrdinalIgnoreCase));
+        var targetIndex = Pane.ColumnOrder.FindIndex(c => c.Equals(target, StringComparison.OrdinalIgnoreCase));
+        if (sourceIndex < 0 || targetIndex < 0) return;
+        var moved = Pane.ColumnOrder[sourceIndex];
+        Pane.ColumnOrder.RemoveAt(sourceIndex);
+        if (sourceIndex < targetIndex) targetIndex--;
+        Pane.ColumnOrder.Insert(targetIndex, moved);
+        _dragColumn = "";
+        await OnColumnsChanged.InvokeAsync();
+    }
+
+    private static string ColumnClass(string column) => column switch
+    {
+        "name" => "col-name",
+        "owner" => "col-owner",
+        "group" => "col-group",
+        "size" => "col-size",
+        "modified" => "col-date",
+        _ => "col-name",
+    };
+
+    private static string ColumnTitle(string column) => column switch
+    {
+        "name" => "Name",
+        "owner" => "Owner",
+        "group" => "Group",
+        "size" => "Size",
+        "modified" => "Modified",
+        _ => column,
+    };
+
+    private static string CellText(RemoteEntry entry, string column) => column switch
+    {
+        "owner" => entry.Owner,
+        "group" => entry.Group,
+        "size" => entry.Type == "dir" ? "" : HumanSize(entry.Size),
+        "modified" => entry.Modified.Year > 1 ? entry.Modified.ToLocalTime().ToString("g") : "",
+        _ => entry.Name,
+    };
+
+    private static string CellTitle(RemoteEntry entry, string column) => column switch
+    {
+        "name" => entry.Name,
+        "owner" => entry.Owner,
+        "group" => entry.Group,
+        "size" => entry.Type == "dir" ? "" : HumanSize(entry.Size),
+        "modified" => entry.Modified.Year > 1 ? entry.Modified.ToLocalTime().ToString("g") : "",
+        _ => "",
+    };
+
+    private string CompareClass(RemoteEntry entry)
+    {
+        if (Pane.CompareMissing.Contains(entry.Name)) return "compare-missing";
+        if (Pane.CompareDifferent.Contains(entry.Name)) return "compare-different";
+        if (Pane.CompareSame.Contains(entry.Name)) return "compare-same";
+        return "";
+    }
 
     private string SortMark(string column)
     {

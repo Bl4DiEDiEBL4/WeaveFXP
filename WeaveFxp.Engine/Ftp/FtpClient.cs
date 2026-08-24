@@ -16,7 +16,7 @@ public sealed class FtpEndpoint
 
 public enum ResponseTraceMode { Full, ListingSummary }
 
-internal sealed class Cp437Encoding : Encoding
+public sealed class Cp437Encoding : Encoding
 {
     public static readonly Cp437Encoding Instance = new();
 
@@ -103,6 +103,8 @@ public sealed class FtpClient : IDisposable
         public List<string> Skiplist = new();
         public List<string> OrderList = new();
         public bool CwdBeforeStatListing;
+        public int TcpSendBufferKBytes;
+        public int TcpReceiveBufferKBytes;
         public Action<string>? Trace;
 
         public static Config FromSite(Site site)
@@ -227,6 +229,7 @@ public sealed class FtpClient : IDisposable
         var c = new FtpClient(cfg);
         c.Trace($"* connecting to {cfg.Host}:{cfg.Port}");
         var tcp = new TcpClient();
+        ConfigureTcp(tcp, cfg);
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(cfg.TimeoutSeconds));
@@ -288,7 +291,9 @@ public sealed class FtpClient : IDisposable
         }
 
         await c.LoginAsync().ConfigureAwait(false);
-        if (cfg.ForceBinary) await c.SetBinaryAsync().ConfigureAwait(false);
+        // Race/FXP clients must always use binary mode; leaving this optional can make
+        // servers default to ASCII, which is slower and unsafe for release files.
+        await c.SetBinaryAsync().ConfigureAwait(false);
         return c;
     }
 
@@ -320,8 +325,8 @@ public sealed class FtpClient : IDisposable
 
     public void Dispose()
     {
-        try { if (_stream is not null) SendLineAsync("QUIT").GetAwaiter().GetResult(); } catch { }
-        
+        // Dispose is also the race engine's emergency drop path. QUIT can block behind
+        // an outstanding transfer reply and delay releasing the worker slot.
         try { _stream?.Dispose(); } catch { }
         try { _tcp?.Dispose(); } catch { }
     }
@@ -453,7 +458,26 @@ public sealed class FtpClient : IDisposable
         }
         var (code, msg) = await ReadResponseAsync().ConfigureAwait(false);
         TraceResponse(code, msg, traceMode);
+        // Track the working directory (cbftp keeps per-conn CWD state the same way) so
+        // EnsureCwdAsync can skip redundant CWDs on repeat transfers in the same dir.
+        if (line.StartsWith("CWD ", StringComparison.OrdinalIgnoreCase))
+            _currentDir = code / 100 == 2 ? line[4..].Trim() : null;
         return (code, msg);
+    }
+
+    private string? _currentDir;
+
+    // cbftp-style transfer addressing: CWD into the directory, then STOR/RETR the BARE
+    // filename. Absolute STOR/RETR/PRET paths through a symlinked section dir (glftpd /
+    // weaveftpd dated sections like "/!0day_today.") are not resolved by every daemon,
+    // while CWD always is. No-op when the connection is already in the right dir.
+    public async Task EnsureCwdAsync(string dir)
+    {
+        dir = (dir ?? "/").Trim();
+        if (dir.Length == 0) dir = "/";
+        if (_currentDir is not null && _currentDir.Equals(dir, StringComparison.Ordinal)) return;
+        var (code, msg) = await CommandAsync("CWD " + dir).ConfigureAwait(false);
+        if (code / 100 != 2) throw new IOException($"CWD {dir} failed: {code} {msg}");
     }
 
     // Sends a command that starts a transfer (1xx/2xx expected).
@@ -705,6 +729,7 @@ public sealed class FtpClient : IDisposable
     {
         Trace($"* opening data connection to {ep.Host}:{ep.Port}");
         var dtcp = new TcpClient();
+        ConfigureTcp(dtcp, _cfg);
         try
         {
             using var timeout = new CancellationTokenSource(DataTimeout);
@@ -720,6 +745,15 @@ public sealed class FtpClient : IDisposable
         dtcp.ReceiveTimeout = (int)DataTimeout.TotalMilliseconds;
         dtcp.SendTimeout = (int)DataTimeout.TotalMilliseconds;
         return dtcp;
+    }
+
+    private static void ConfigureTcp(TcpClient tcp, Config cfg)
+    {
+        tcp.NoDelay = true;
+        if (cfg.TcpReceiveBufferKBytes > 0)
+            tcp.ReceiveBufferSize = Math.Clamp(cfg.TcpReceiveBufferKBytes, 1, 16384) * 1024;
+        if (cfg.TcpSendBufferKBytes > 0)
+            tcp.SendBufferSize = Math.Clamp(cfg.TcpSendBufferKBytes, 1, 16384) * 1024;
     }
 
     private async Task<Stream> WrapDataTlsAsync(TcpClient dtcp, CancellationToken ct)
@@ -799,7 +833,7 @@ public sealed class FtpClient : IDisposable
 
     // progress, when set, receives the cumulative byte count as the file streams.
     public async Task<long> RetrieveToAsync(string path, Stream output, CancellationToken ct = default,
-        IProgress<long>? progress = null)
+        IProgress<long>? progress = null, long maxBytes = 0)
     {
         await SetBinaryAsync().ConfigureAwait(false);
         var command = "RETR " + path;
@@ -827,6 +861,8 @@ public sealed class FtpClient : IDisposable
                     throw new IOException($"data transfer stalled after {total} bytes");
                 }
                 if (read == 0) break;
+                if (maxBytes > 0 && total + read > maxBytes)
+                    throw new IOException($"remote file {path} exceeds {maxBytes} bytes");
                 await output.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
                 total += read;
                 progress?.Report(total);
@@ -845,12 +881,59 @@ public sealed class FtpClient : IDisposable
         }
     }
 
+    public async Task<long> StoreFromAsync(string path, Stream input, CancellationToken ct = default,
+        IProgress<long>? progress = null)
+    {
+        await SetBinaryAsync().ConfigureAwait(false);
+        var command = "STOR " + path;
+        await MaybePretAsync(command).ConfigureAwait(false);
+        var (ep, _) = await EnterPassiveAsync("").ConfigureAwait(false);
+        var dtcp = await OpenDataTcpAsync(ep, ct).ConfigureAwait(false);
+        Stream? stream = null;
+        try
+        {
+            await StartCommandAsync(command).ConfigureAwait(false);
+            stream = await WrapDataTlsAsync(dtcp, ct).ConfigureAwait(false);
+            long total = 0;
+            var buffer = new byte[64 * 1024];
+            while (true)
+            {
+                using var idle = new CancellationTokenSource(DataTimeout);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, idle.Token);
+                int read;
+                try
+                {
+                    read = await input.ReadAsync(buffer, linked.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (idle.IsCancellationRequested)
+                {
+                    throw new IOException($"local file read stalled after {total} bytes");
+                }
+                if (read == 0) break;
+                await stream.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                total += read;
+                progress?.Report(total);
+            }
+            await stream.FlushAsync(ct).ConfigureAwait(false);
+            await WaitFinalAsync().ConfigureAwait(false);
+            return total;
+        }
+        catch (Exception ex) when (ex is not IOException)
+        {
+            throw new IOException($"data transfer failed: {ex.Message}", ex);
+        }
+        finally
+        {
+            stream?.Dispose();
+            dtcp.Dispose();
+        }
+    }
+
     public async Task<string> RetrieveTextAsync(string path, long maxBytes, CancellationToken ct = default)
     {
         if (maxBytes <= 0) maxBytes = 1024 * 1024;
         using var ms = new MemoryStream();
-        var written = await RetrieveToAsync(path, ms, ct).ConfigureAwait(false);
-        if (written > maxBytes) throw new IOException($"remote file {path} exceeds {maxBytes} bytes");
+        await RetrieveToAsync(path, ms, ct, maxBytes: maxBytes).ConfigureAwait(false);
         return FtpTextEncoding.GetString(ms.ToArray());
     }
 
@@ -899,6 +982,8 @@ public sealed class FtpClient : IDisposable
             'l' => "link",
             _ => "unknown",
         };
+        entry.Owner = parts[2];
+        entry.Group = parts[3];
         if (long.TryParse(parts[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out var size))
             entry.Size = size;
         if (entry.Type == "link")

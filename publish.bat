@@ -22,7 +22,9 @@ set "OUT=%ROOT%Release"
 set "ZIPOUT=%OUT%\zips"
 set "WORK=%TEMP%\WeaveFXP-publish-%RANDOM%-%RANDOM%"
 set "PROJ=%ROOT%WeaveFxp.Web\WeaveFxp.Web.csproj"
-set "VERSION=1.0.0"
+set "VERSION=1.0.1"
+set "LEGACY_DATA=%OUT%\data"
+set "LEGACY_DATA_SEED=%WORK%\legacy-data"
 
 if not exist "%PROJ%" (
     echo.
@@ -45,6 +47,14 @@ if not exist "%OUT%" mkdir "%OUT%"
 if not exist "%ZIPOUT%" mkdir "%ZIPOUT%"
 if not exist "%WORK%" mkdir "%WORK%"
 
+rem Older builds stored data directly in Release\data while the single-exe runtime
+rem stores it next to the executable in Release\<runtime>\data. Preserve that legacy
+rem folder as a seed so publishing never makes an existing setup look empty.
+if exist "%LEGACY_DATA%" (
+    if exist "%LEGACY_DATA_SEED%" rd /s /q "%LEGACY_DATA_SEED%"
+    xcopy "%LEGACY_DATA%" "%LEGACY_DATA_SEED%\" /e /i /q /y >nul
+)
+
 rem Clean old one-folder release files that may still sit directly under Release\.
 rem This release lives only in Release\<runtime-id>.
 del /q "%OUT%\*" 2>nul
@@ -53,7 +63,7 @@ echo.
 echo === Restoring ===
 dotnet restore "%PROJ%" || goto fail
 
-for /f "usebackq delims=" %%V in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[xml]$p=Get-Content '%PROJ%'; $v=$p.Project.PropertyGroup.Version | Select-Object -First 1; if ($v) { $v } else { '1.0.0' }"`) do set "VERSION=%%V"
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[xml]$p=Get-Content '%PROJ%'; $v=$p.Project.PropertyGroup.Version | Select-Object -First 1; if ($v) { $v } else { '1.0.1' }"`) do set "VERSION=%%V"
 
 if "%~1"=="" (
     set "RIDS=win-x64 linux-x64 linux-arm64"
@@ -70,6 +80,7 @@ for %%R in (!RIDS!) do (
     set "PRESERVE_DATA=%WORK%\data-%%R"
     if exist "!PRESERVE_DATA!" rd /s /q "!PRESERVE_DATA!"
     if exist "%OUT%\%%R\data" move "%OUT%\%%R\data" "!PRESERVE_DATA!" >nul
+    if not exist "!PRESERVE_DATA!" if exist "%LEGACY_DATA_SEED%" xcopy "%LEGACY_DATA_SEED%" "!PRESERVE_DATA%\" /e /i /q /y >nul
 
     rem Wiped first: publish does not delete stale files from earlier runs.
     if exist "%OUT%\%%R" rd /s /q "%OUT%\%%R"
@@ -116,6 +127,7 @@ echo   Zips       : Release\zips\WeaveFXP-v%VERSION%-*.zip
 echo.
 echo   Ship only the per-platform zip.
 echo   The data\ folder is created on first run next to the executable and preserved on republish.
+echo   Legacy Release\data is copied into runtime folders when no runtime data exists yet.
 echo.
 if exist "%WORK%" rd /s /q "%WORK%"
 endlocal

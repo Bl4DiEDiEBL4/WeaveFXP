@@ -28,7 +28,8 @@
     </nav>
 
     <div class="browsers">
-        <PaneView Pane="Active.Left" Sites="_sites"
+        <PaneView Pane="Active.Left" Sites="_sites" LocalRoots="@LocalRoots()"
+                  OnLocal='() => ToggleLocalPane(Active.Left)'
                   OnSiteSelected="s => ConnectPane(Active.Left, s)"
                   OnSectionSelected="s => JumpSection(Active.Left, s)"
                   OnPathChanged="p => SetPanePath(Active.Left, p)"
@@ -36,11 +37,12 @@
                   OnDisconnect="() => DisconnectPane(Active.Left)"
                   OnUp="() => GoUp(Active.Left)"
                   OnGo="() => ListPane(Active.Left)"
-                  OnSfv="() => Sfv(Active.Left)"
+                  OnCompare="() => CompareBrowses(Active.Left)"
                   OnDownload="() => Download(Active.Left)"
                   OnOpen="i => OpenEntry(Active.Left, i)"
                   OnSelect="t => ToggleSelect(Active.Left, t.Item1, t.Item2)"
                   OnSort="c => SortPane(Active.Left, c)"
+                  OnColumnsChanged="PersistBrowserState"
                   OnContext="t => ShowContext(Active.Left, t.Item1, t.Item2)" />
 
         <div class="pane-mid">
@@ -54,7 +56,8 @@
             <button class="fxp-btn" title="FXP selected: right to left" @onclick="() => QueueFxp(Active.Right, Active.Left)">◀</button>
         </div>
 
-        <PaneView Pane="Active.Right" Sites="_sites"
+        <PaneView Pane="Active.Right" Sites="_sites" LocalRoots="@LocalRoots()"
+                  OnLocal='() => ToggleLocalPane(Active.Right)'
                   OnSiteSelected="s => ConnectPane(Active.Right, s)"
                   OnSectionSelected="s => JumpSection(Active.Right, s)"
                   OnPathChanged="p => SetPanePath(Active.Right, p)"
@@ -62,11 +65,12 @@
                   OnDisconnect="() => DisconnectPane(Active.Right)"
                   OnUp="() => GoUp(Active.Right)"
                   OnGo="() => ListPane(Active.Right)"
-                  OnSfv="() => Sfv(Active.Right)"
+                  OnCompare="() => CompareBrowses(Active.Right)"
                   OnDownload="() => Download(Active.Right)"
                   OnOpen="i => OpenEntry(Active.Right, i)"
                   OnSelect="t => ToggleSelect(Active.Right, t.Item1, t.Item2)"
                   OnSort="c => SortPane(Active.Right, c)"
+                  OnColumnsChanged="PersistBrowserState"
                   OnContext="t => ShowContext(Active.Right, t.Item1, t.Item2)" />
     </div>
 
@@ -109,7 +113,7 @@
                                     }
                                     else if (job.FilesDone > 0 || job.CumulativeBytes > 0)
                                     {
-                                        <span class="job-tally">@job.FilesDone file(s) · @HumanSize(job.CumulativeBytes) raced</span>
+                                        <span class="job-tally">@job.FilesDone file(s) · @HumanSize(job.CumulativeBytes) @MovedLabel(job)</span>
                                     }
                                 </summary>
                                 @if (job.State == JobState.Running && job.Slots.Count > 0)
@@ -199,26 +203,50 @@
                 {
                     <button @onclick="OpenContextEntry">Open</button>
                 }
+                else
+                {
+                    @if (IsNfoFile(entry.Name))
+                    {
+                        <button @onclick="() => ViewContextFile(ViewerMode.Text)">NFO Viewer</button>
+                    }
+                    @if (IsImageFile(entry.Name))
+                    {
+                        <button @onclick="() => ViewContextFile(ViewerMode.Image)">Image Viewer</button>
+                    }
+                    <button @onclick="() => ViewContextFile(ViewerMode.Auto)">File Viewer</button>
+                }
                 <button disabled="@(!CanTransfer(_contextPane))" @onclick="() => TransferFromContext(false)">Transfer to @OtherSideName(_contextPane)</button>
                 <button disabled="@(!CanTransfer(_contextPane))" @onclick="() => TransferFromContext(true)">Queue transfer to @OtherSideName(_contextPane)</button>
-                <button disabled="@(_contextPane is null || string.IsNullOrEmpty(_contextPane.Site))" @onclick="DownloadContext">Download</button>
+                <button disabled="@(!CanLocalTransferAction(_contextPane))" @onclick="DownloadContext">@LocalTransferActionLabel(_contextPane)</button>
                 <div class="context-sep"></div>
-                <button @onclick="() => OpenCommandShell(ChmodCommand())">Chmod 755…</button>
-                @if (entry.Type == "dir")
+                <button @onclick="CompareContext">Compare folders</button>
+                <button class="danger" @onclick="DeleteContext">Delete</button>
+                @if (!IsLocalPane(_contextPane))
                 {
-                    <button @onclick="() => OpenCommandShell(NukeCommand())">Nuke…</button>
-                    <button @onclick="CheckContextSfv">Check SFV Here</button>
+                    <button class="danger" @onclick="() => OpenCommandShell(DeleteCommand())">Delete command…</button>
+                    <button @onclick="() => OpenCommandShell(ChmodCommand())">Chmod 755…</button>
+                    @if (entry.Type == "dir")
+                    {
+                        <button @onclick="() => OpenCommandShell(NukeCommand())">Nuke…</button>
+                    }
                 }
             }
             else
             {
                 @* Empty space: whole-directory / connection actions only. *@
-                <button @onclick="CheckContextSfv">Check SFV Here</button>
+                <button @onclick="CompareContext">Compare folders</button>
+                @if (!IsLocalPane(_contextPane))
+                {
+                    <button class="danger" @onclick="() => OpenCommandShell(RemoveDirCommand())">Delete current dir…</button>
+                }
             }
             <div class="context-sep"></div>
-            <button @onclick="() => OpenCommandShell()">Command Shell</button>
-            <button @onclick='() => OpenCommandShell("SITE WHO")'>SITE WHO</button>
-            <button @onclick='() => OpenCommandShell("SITE INVITE ")'>Invite…</button>
+            @if (!IsLocalPane(_contextPane))
+            {
+                <button @onclick="() => OpenCommandShell()">Command Shell</button>
+                <button @onclick='() => OpenCommandShell("SITE WHO")'>SITE WHO</button>
+                <button @onclick='() => OpenCommandShell("SITE INVITE ")'>Invite…</button>
+            }
             <button @onclick="RefreshContextPane">Refresh</button>
         }
     </div>
@@ -243,6 +271,38 @@
         @if (!string.IsNullOrEmpty(_shellResult))
         {
             <pre class="console">@_shellResult</pre>
+        }
+    </section>
+}
+
+@if (_viewerOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseViewer"></div>
+    <section class="modal viewer-modal">
+        <header>
+            <div>
+                <h3>@_viewerTitle</h3>
+                <div class="viewer-meta">@_viewerSite · @_viewerPath</div>
+            </div>
+            <button class="secondary icon-btn" title="Close" @onclick="CloseViewer">×</button>
+        </header>
+        @if (!string.IsNullOrWhiteSpace(_viewerError))
+        {
+            <div class="alert error">@_viewerError</div>
+        }
+        else if (_viewerLoading)
+        {
+            <div class="pane-overlay busy">Loading file…</div>
+        }
+        else if (_viewerIsImage)
+        {
+            <div class="image-viewer">
+                <img src="@_viewerImageSrc" alt="@_viewerTitle" />
+            </div>
+        }
+        else
+        {
+            <pre class="console file-viewer-text">@_viewerText</pre>
         }
     </section>
 }
@@ -279,6 +339,15 @@
     private string _shellLogAlias = "";
     private string _shellCommand = "";
     private string _shellResult = "";
+    private bool _viewerOpen;
+    private bool _viewerLoading;
+    private bool _viewerIsImage;
+    private string _viewerSite = "";
+    private string _viewerPath = "";
+    private string _viewerTitle = "File Viewer";
+    private string _viewerText = "";
+    private string _viewerImageSrc = "";
+    private string _viewerError = "";
     private bool _browserStorageReady;
     private bool _restoringBrowserState;
     private const string BrowserStateKey = "weavefxp.browser.v1";
@@ -603,9 +672,11 @@
     {
         if (snapshot is null) return;
         pane.Site = snapshot.Site ?? "";
+        pane.LastSite = snapshot.LastSite ?? "";
         pane.Path = string.IsNullOrWhiteSpace(snapshot.Path) ? "/" : snapshot.Path.Trim();
         pane.SortColumn = string.IsNullOrWhiteSpace(snapshot.SortColumn) ? "name" : snapshot.SortColumn.Trim();
         pane.SortDesc = snapshot.SortDesc;
+        pane.ColumnOrder = NormalizePaneColumns(snapshot.ColumnOrder);
         pane.Status = string.IsNullOrWhiteSpace(pane.Site) ? "Idle" : "Restoring...";
         pane.Loaded = false;
         pane.Loading = false;
@@ -644,10 +715,25 @@
     private static PaneSnapshot SnapshotPane(PaneModel pane) => new()
     {
         Site = pane.Site,
+        LastSite = pane.LastSite,
         Path = pane.Path,
         SortColumn = pane.SortColumn,
         SortDesc = pane.SortDesc,
+        ColumnOrder = NormalizePaneColumns(pane.ColumnOrder),
     };
+
+    private static List<string> NormalizePaneColumns(IEnumerable<string>? columns)
+    {
+        var defaults = new[] { "name", "owner", "group", "size", "modified" };
+        var result = (columns ?? Array.Empty<string>())
+            .Where(c => defaults.Contains(c, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        foreach (var column in defaults)
+            if (!result.Contains(column, StringComparer.OrdinalIgnoreCase))
+                result.Add(column);
+        return result;
+    }
 
     private IEnumerable<PaneModel> AllPanes()
     {
@@ -680,8 +766,23 @@
     private static bool ShouldRefreshPaneForJob(PaneModel pane, Job job)
     {
         if (string.IsNullOrWhiteSpace(pane.Site) || string.IsNullOrWhiteSpace(job.Request.ToSite)) return false;
+        if (IsLocalPane(pane) && job.Type == JobType.Download)
+            return LocalPathTouchesBrowse(pane.Path, job.Request.DestPath);
+        if (!IsLocalPane(pane) && job.Type == JobType.Upload && pane.Site.Equals(job.Request.ToSite, StringComparison.OrdinalIgnoreCase))
+            return PathTouchesBrowse(pane.Path, job.Request.DestPath);
         if (!pane.Site.Equals(job.Request.ToSite, StringComparison.OrdinalIgnoreCase)) return false;
         return PathTouchesBrowse(pane.Path, job.Request.DestPath);
+    }
+
+    private static bool LocalPathTouchesBrowse(string browsePath, string changedPath)
+    {
+        if (string.IsNullOrWhiteSpace(browsePath) || string.IsNullOrWhiteSpace(changedPath)) return false;
+        var browse = Path.GetFullPath(browsePath);
+        var changed = Path.GetFullPath(changedPath);
+        var parent = Path.GetDirectoryName(changed) ?? changed;
+        return browse.Equals(parent, StringComparison.OrdinalIgnoreCase) ||
+               browse.Equals(changed, StringComparison.OrdinalIgnoreCase) ||
+               parent.StartsWith(browse.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool PathTouchesBrowse(string browsePath, string changedPath)
@@ -704,7 +805,109 @@
         return path.Length > 1 ? path.TrimEnd('/') : path;
     }
 
+    private static bool IsLocalPane(PaneModel? pane) =>
+        pane?.Site.Equals("local", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static string LocalStartPath()
+    {
+        if (OperatingSystem.IsWindows()) return "";
+        return "/";
+    }
+
+    private static IReadOnlyList<string> LocalRoots()
+    {
+        if (OperatingSystem.IsWindows())
+            return DriveInfo.GetDrives()
+                .Where(d => d.IsReady || d.DriveType is DriveType.Fixed or DriveType.Removable or DriveType.Network)
+                .Select(d => d.RootDirectory.FullName)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        return new[] { "/" };
+    }
+
+    private static string LocalParentPath(string path)
+    {
+        path = string.IsNullOrWhiteSpace(path) ? LocalStartPath() : path;
+        var root = Path.GetPathRoot(path);
+        if (OperatingSystem.IsWindows() && (string.IsNullOrWhiteSpace(path) || path == "/" || path.Equals(root, StringComparison.OrdinalIgnoreCase)))
+            return "";
+        if (!string.IsNullOrEmpty(root) && path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+            return root;
+        return Directory.GetParent(path)?.FullName ?? root ?? path;
+    }
+
+    private static List<RemoteEntry> ListLocal(string path)
+    {
+        if (OperatingSystem.IsWindows() && string.IsNullOrWhiteSpace(path))
+        {
+            return DriveInfo.GetDrives()
+                .Select(d => new RemoteEntry
+                {
+                    Name = d.Name.TrimEnd('\\'),
+                    Path = d.RootDirectory.FullName,
+                    Type = "dir",
+                    Modified = DateTime.MinValue,
+                })
+                .ToList();
+        }
+
+        path = string.IsNullOrWhiteSpace(path) ? LocalStartPath() : path;
+        var entries = new List<RemoteEntry>();
+        foreach (var dir in SafeEnumerateDirectories(path))
+        {
+            var info = new DirectoryInfo(dir);
+            entries.Add(new RemoteEntry { Name = info.Name, Path = info.FullName, Type = "dir", Modified = info.LastWriteTimeUtc });
+        }
+        foreach (var file in SafeEnumerateFiles(path))
+        {
+            var info = new FileInfo(file);
+            entries.Add(new RemoteEntry { Name = info.Name, Path = info.FullName, Type = "file", Size = info.Length, Modified = info.LastWriteTimeUtc });
+        }
+        return entries;
+    }
+
+    private static IEnumerable<string> SafeEnumerateDirectories(string path)
+    {
+        try { return Directory.EnumerateDirectories(path); }
+        catch { return Enumerable.Empty<string>(); }
+    }
+
+    private static IEnumerable<string> SafeEnumerateFiles(string path)
+    {
+        try { return Directory.EnumerateFiles(path); }
+        catch { return Enumerable.Empty<string>(); }
+    }
+
+    private static string EntryPath(PaneModel pane, RemoteEntry entry)
+    {
+        if (!string.IsNullOrEmpty(entry.Path)) return entry.Path;
+        return IsLocalPane(pane) ? Path.Combine(pane.Path, entry.Name) : PJoin(pane.Path, entry.Name);
+    }
+
+    private static void ClearCompare(PaneModel pane)
+    {
+        pane.CompareMissing.Clear();
+        pane.CompareDifferent.Clear();
+        pane.CompareSame.Clear();
+    }
+
     // ---- browse operations ----
+
+    private Task ToggleLocalPane(PaneModel pane)
+    {
+        if (IsLocalPane(pane))
+        {
+            var site = !string.IsNullOrWhiteSpace(pane.LastSite) && _sites.Any(s => s.Name.Equals(pane.LastSite, StringComparison.OrdinalIgnoreCase))
+                ? pane.LastSite
+                : _sites.FirstOrDefault()?.Name ?? "";
+            return ConnectPane(pane, site);
+        }
+
+        if (!string.IsNullOrWhiteSpace(pane.Site))
+            pane.LastSite = pane.Site;
+        return ConnectPane(pane, "local");
+    }
 
     private async Task ConnectPane(PaneModel pane, string site)
     {
@@ -714,9 +917,16 @@
             return;
         }
 
+        if (!site.Equals("local", StringComparison.OrdinalIgnoreCase))
+            pane.LastSite = site;
         pane.Site = site;
-        var s = _sites.FirstOrDefault(x => x.Name == site);
-        pane.Path = string.IsNullOrEmpty(s?.BasePath) ? "/" : s!.BasePath;
+        if (IsLocalPane(pane))
+            pane.Path = LocalStartPath();
+        else
+        {
+            var s = _sites.FirstOrDefault(x => x.Name == site);
+            pane.Path = string.IsNullOrEmpty(s?.BasePath) ? "/" : s!.BasePath;
+        }
         await ListPane(pane);
     }
 
@@ -726,6 +936,7 @@
         pane.Path = "/";
         pane.Entries.Clear();
         pane.Selected.Clear();
+        ClearCompare(pane);
         pane.Loaded = false;
         pane.Loading = false;
         pane.Error = null;
@@ -735,6 +946,13 @@
 
     private async Task JumpSection(PaneModel pane, string section)
     {
+        if (IsLocalPane(pane))
+        {
+            if (string.IsNullOrWhiteSpace(section)) return;
+            pane.Path = section;
+            await ListPane(pane);
+            return;
+        }
         if (string.IsNullOrEmpty(pane.Site) || string.IsNullOrEmpty(section)) return;
         pane.Path = section;
         await ListPane(pane);
@@ -742,7 +960,7 @@
 
     private void SetPanePath(PaneModel pane, string path)
     {
-        pane.Path = string.IsNullOrWhiteSpace(path) ? "/" : path.Trim();
+        pane.Path = string.IsNullOrWhiteSpace(path) ? (IsLocalPane(pane) ? "" : "/") : path.Trim();
         PersistBrowserState();
     }
 
@@ -751,14 +969,17 @@
         if (pane.Loading || string.IsNullOrEmpty(pane.Site)) return;
         pane.Loading = true;
         pane.Error = null;
-        pane.Status = $"Connecting to {pane.Site}…";
+        pane.Status = IsLocalPane(pane) ? $"Opening {pane.Path}..." : $"Connecting to {pane.Site}…";
         await InvokeAsync(StateHasChanged);
         try
         {
-            var entries = await Engine.ListRemoteAsync(pane.Site, pane.Path, BrowseLogName(pane));
+            var entries = IsLocalPane(pane)
+                ? await Task.Run(() => ListLocal(pane.Path))
+                : await Engine.ListRemoteAsync(pane.Site, pane.Path, BrowseLogName(pane));
             pane.Entries = entries;
             ApplySort(pane);
             pane.Selected.Clear();
+            ClearCompare(pane);
             pane.Loaded = true;
             UpdatePaneStatus(pane);
         }
@@ -789,7 +1010,9 @@
         // point at the real release dirs). CWD on the server resolves the link.
         if (entry.Type is "dir" or "link")
         {
-            pane.Path = string.IsNullOrEmpty(entry.Path) ? PJoin(pane.Path, entry.Name) : entry.Path;
+            pane.Path = string.IsNullOrEmpty(entry.Path)
+                ? (IsLocalPane(pane) ? Path.Combine(pane.Path, entry.Name) : PJoin(pane.Path, entry.Name))
+                : entry.Path;
             await ListPane(pane);
         }
     }
@@ -797,7 +1020,7 @@
     private async Task GoUp(PaneModel pane)
     {
         if (string.IsNullOrEmpty(pane.Site)) return;
-        pane.Path = ParentPath(pane.Path);
+        pane.Path = IsLocalPane(pane) ? LocalParentPath(pane.Path) : ParentPath(pane.Path);
         await ListPane(pane);
     }
 
@@ -851,6 +1074,12 @@
             "modified" => pane.SortDesc
                 ? dirsFirst.ThenByDescending(e => e.Modified).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
                 : dirsFirst.ThenBy(e => e.Modified).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase),
+            "owner" => pane.SortDesc
+                ? dirsFirst.ThenByDescending(e => e.Owner, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                : dirsFirst.ThenBy(e => e.Owner, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase),
+            "group" => pane.SortDesc
+                ? dirsFirst.ThenByDescending(e => e.Group, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+                : dirsFirst.ThenBy(e => e.Group, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase),
             _ => pane.SortDesc
                 ? dirsFirst.ThenByDescending(e => e.Name, StringComparer.OrdinalIgnoreCase)
                 : dirsFirst.ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase),
@@ -869,17 +1098,43 @@
         var queued = 0;
         foreach (var entry in picks)
         {
-            var src = string.IsNullOrEmpty(entry.Path) ? PJoin(source.Path, entry.Name) : entry.Path;
-            var dst = PJoin(dest.Path, entry.Name);
+            var src = EntryPath(source, entry);
+            var dst = IsLocalPane(dest) ? Path.Combine(dest.Path, entry.Name) : PJoin(dest.Path, entry.Name);
             try
             {
-                Engine.StartFxp(new TransferRequest
+                if (IsLocalPane(source) && !IsLocalPane(dest))
                 {
-                    FromSite = source.Site,
-                    ToSite = dest.Site,
-                    SourcePath = src,
-                    DestPath = dst,
-                });
+                    Engine.StartUpload(new UploadRequest
+                    {
+                        Site = dest.Site,
+                        SourcePath = src,
+                        DestPath = dst,
+                    });
+                }
+                else if (!IsLocalPane(source) && IsLocalPane(dest))
+                {
+                    Engine.StartDownload(new DownloadRequest
+                    {
+                        Site = source.Site,
+                        SourcePath = src,
+                        DestPath = dst,
+                    });
+                }
+                else if (!IsLocalPane(source) && !IsLocalPane(dest))
+                {
+                    Engine.StartFxp(new TransferRequest
+                    {
+                        FromSite = source.Site,
+                        ToSite = dest.Site,
+                        SourcePath = src,
+                        DestPath = dst,
+                    });
+                }
+                else
+                {
+                    Toast("Local to local transfer is not queued here");
+                    continue;
+                }
                 queued++;
             }
             catch (Exception ex) { Toast($"{entry.Name}: {ex.Message}"); }
@@ -957,6 +1212,88 @@
         return !string.IsNullOrEmpty(other.Site) && !other.Site.Equals(pane.Site, StringComparison.OrdinalIgnoreCase);
     }
 
+    private bool CanDownload(PaneModel? pane) =>
+        pane is not null && !IsLocalPane(pane) && !string.IsNullOrEmpty(pane.Site);
+
+    private bool CanLocalTransferAction(PaneModel? pane) =>
+        IsLocalPane(pane) ? CanTransfer(pane) : CanDownload(pane);
+
+    private string LocalTransferActionLabel(PaneModel? pane) => IsLocalPane(pane) ? "Upload" : "Download";
+
+    private void CompareContext()
+    {
+        if (_contextPane is not null)
+            CompareBrowses(_contextPane);
+        HideContext();
+    }
+
+    private void CompareBrowses(PaneModel pane)
+    {
+        var other = OtherPane(pane);
+        if (!pane.Loaded || !other.Loaded)
+        {
+            Toast("Load both browses first");
+            return;
+        }
+
+        ClearCompare(pane);
+        ClearCompare(other);
+
+        var left = pane.Entries
+            .Where(e => e.Name is not "." and not "..")
+            .GroupBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var right = other.Entries
+            .Where(e => e.Name is not "." and not "..")
+            .GroupBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var same = 0;
+        var diff = 0;
+        var missingLeft = 0;
+        var missingRight = 0;
+
+        foreach (var (name, entry) in left)
+        {
+            if (!right.TryGetValue(name, out var otherEntry))
+            {
+                pane.CompareMissing.Add(name);
+                missingRight++;
+                continue;
+            }
+            if (EntriesEqual(entry, otherEntry))
+            {
+                pane.CompareSame.Add(name);
+                other.CompareSame.Add(name);
+                same++;
+            }
+            else
+            {
+                pane.CompareDifferent.Add(name);
+                other.CompareDifferent.Add(name);
+                diff++;
+            }
+        }
+
+        foreach (var name in right.Keys)
+        {
+            if (left.ContainsKey(name)) continue;
+            other.CompareMissing.Add(name);
+            missingLeft++;
+        }
+
+        pane.Status = $"{pane.Status} — compare: {same} same, {diff} different, {missingRight} missing on other";
+        other.Status = $"{other.Status} — compare: {same} same, {diff} different, {missingLeft} missing on other";
+        Toast($"Compare: {same} same, {diff} different, {missingLeft + missingRight} missing");
+    }
+
+    private static bool EntriesEqual(RemoteEntry a, RemoteEntry b)
+    {
+        if (!a.Type.Equals(b.Type, StringComparison.OrdinalIgnoreCase)) return false;
+        if (a.Type == "dir") return true;
+        return a.Size == b.Size;
+    }
+
     private bool CanRestartContextJob()
     {
         var job = ContextJob;
@@ -1022,6 +1359,62 @@
         _shellResult = "";
         _shellOpen = true;
         HideContext();
+    }
+
+    private async Task ViewContextFile(ViewerMode mode)
+    {
+        var pane = _contextPane;
+        var entry = ContextEntry();
+        HideContext();
+
+        if (pane is null || entry is null) return;
+        if (string.IsNullOrWhiteSpace(pane.Site)) { Toast("Browse has no connected site"); return; }
+        if (!entry.Type.Equals("file", StringComparison.OrdinalIgnoreCase)) { Toast("Pick a file first"); return; }
+
+        var path = EntryPath(pane, entry);
+        var image = mode == ViewerMode.Image || (mode == ViewerMode.Auto && IsImageFile(entry.Name));
+
+        _viewerOpen = true;
+        _viewerLoading = true;
+        _viewerIsImage = image;
+        _viewerSite = pane.Site;
+        _viewerPath = path;
+        _viewerTitle = image ? $"Image Viewer - {entry.Name}" : $"{ViewerLabel(entry.Name)} - {entry.Name}";
+        _viewerText = "";
+        _viewerImageSrc = "";
+        _viewerError = "";
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var bytes = IsLocalPane(pane)
+                ? await File.ReadAllBytesAsync(path)
+                : await Engine.RetrieveRemoteFileAsync(pane.Site, path);
+            if (image)
+            {
+                _viewerImageSrc = $"data:{ImageMime(entry.Name)};base64,{Convert.ToBase64String(bytes)}";
+            }
+            else
+            {
+                _viewerText = DecodeViewerText(bytes, entry.Name);
+            }
+        }
+        catch (Exception ex)
+        {
+            _viewerError = ex.Message;
+        }
+        finally
+        {
+            _viewerLoading = false;
+        }
+    }
+
+    private void CloseViewer()
+    {
+        _viewerOpen = false;
+        _viewerImageSrc = "";
+        _viewerText = "";
+        _viewerError = "";
     }
 
     private void CancelContextJob()
@@ -1107,6 +1500,70 @@
         return "SITE NUKE " + (entry?.Name ?? "");
     }
 
+    private string RemoveDirCommand()
+    {
+        var path = NormalizeRemotePath(_contextPane?.Path ?? "/");
+        return "RMD " + path;
+    }
+
+    private string DeleteCommand()
+    {
+        var entry = ContextEntry();
+        if (_contextPane is null || entry is null) return "";
+        var path = EntryPath(_contextPane, entry);
+        return entry.Type == "dir" ? "RMD " + path : "DELE " + path;
+    }
+
+    private async Task DeleteContext()
+    {
+        var pane = _contextPane;
+        var entry = ContextEntry();
+        HideContext();
+        if (pane is null || entry is null) return;
+
+        var path = EntryPath(pane, entry);
+        try
+        {
+            if (IsLocalPane(pane))
+            {
+                DeleteLocalPath(path);
+                Toast($"Deleted local {entry.Name}");
+            }
+            else
+            {
+                await Engine.DeleteRemotePathAsync(pane.Site, path);
+                Toast($"Deleted remote {entry.Name}");
+            }
+            await ListPane(pane, true);
+        }
+        catch (Exception ex)
+        {
+            Toast($"Delete failed: {ex.Message}");
+        }
+    }
+
+    private static void DeleteLocalPath(string path)
+    {
+        path = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(path);
+        if (string.IsNullOrWhiteSpace(root) ||
+            path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Equals(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+            throw new IOException("refusing to delete local root");
+
+        if (File.Exists(path))
+        {
+            File.Delete(path);
+            return;
+        }
+        if (Directory.Exists(path))
+        {
+            Directory.Delete(path, recursive: true);
+            return;
+        }
+        throw new FileNotFoundException("local path not found", path);
+    }
+
     private void DownloadContext()
     {
         if (_contextPane is not null)
@@ -1131,16 +1588,30 @@
     private void Download(PaneModel pane)
     {
         if (string.IsNullOrEmpty(pane.Site)) { Toast("Pick a site first"); return; }
+        if (IsLocalPane(pane))
+        {
+            QueueFxp(pane, OtherPane(pane));
+            return;
+        }
         var picks = pane.Selected.Select(i => pane.Entries[i]).ToList();
         if (picks.Count == 0) { Toast("Select files or directories first"); return; }
+        var other = OtherPane(pane);
+        var localDest = IsLocalPane(other) && other.Loaded ? other.Path : "";
         var queued = 0;
         foreach (var entry in picks)
         {
-            var src = string.IsNullOrEmpty(entry.Path) ? PJoin(pane.Path, entry.Name) : entry.Path;
-            try { Engine.StartDownload(new DownloadRequest { Site = pane.Site, SourcePath = src }); queued++; }
+            var src = EntryPath(pane, entry);
+            var dest = string.IsNullOrEmpty(localDest) ? "" : Path.Combine(localDest, entry.Name);
+            try { Engine.StartDownload(new DownloadRequest { Site = pane.Site, SourcePath = src, DestPath = dest }); queued++; }
             catch (Exception ex) { Toast($"{entry.Name}: {ex.Message}"); }
         }
-        if (queued > 0) { Toast($"Queued {queued} download(s) from {pane.Site}"); _tab = "queue"; }
+        if (queued > 0)
+        {
+            Toast(string.IsNullOrEmpty(localDest)
+                ? $"Queued {queued} download(s) from {pane.Site}"
+                : $"Queued {queued} download(s) to {localDest}");
+            _tab = "queue";
+        }
     }
 
     private async Task Sfv(PaneModel pane)
@@ -1180,11 +1651,58 @@
         return $"{v.ToString(v >= 100 ? "0" : "0.0")} {units[u]}";
     }
 
+    private static bool IsNfoFile(string name)
+    {
+        var ext = Path.GetExtension(name);
+        return ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".diz", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsImageFile(string name)
+    {
+        var ext = Path.GetExtension(name);
+        return ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".gif", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".bmp", StringComparison.OrdinalIgnoreCase) ||
+               ext.Equals(".webp", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ViewerLabel(string name) => IsNfoFile(name) ? "NFO Viewer" : "File Viewer";
+
+    private static string ImageMime(string name)
+    {
+        var ext = Path.GetExtension(name);
+        if (ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) || ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase)) return "image/jpeg";
+        if (ext.Equals(".png", StringComparison.OrdinalIgnoreCase)) return "image/png";
+        if (ext.Equals(".gif", StringComparison.OrdinalIgnoreCase)) return "image/gif";
+        if (ext.Equals(".bmp", StringComparison.OrdinalIgnoreCase)) return "image/bmp";
+        if (ext.Equals(".webp", StringComparison.OrdinalIgnoreCase)) return "image/webp";
+        return "application/octet-stream";
+    }
+
+    private static string DecodeViewerText(byte[] bytes, string name)
+    {
+        if (IsNfoFile(name) || Path.GetExtension(name).Equals(".sfv", StringComparison.OrdinalIgnoreCase))
+            return Cp437Encoding.Instance.GetString(bytes);
+
+        try
+        {
+            var utf8 = new System.Text.UTF8Encoding(false, true);
+            return utf8.GetString(bytes);
+        }
+        catch
+        {
+            return Cp437Encoding.Instance.GetString(bytes);
+        }
+    }
+
     private static string ProgressText(Job job)
     {
         // Downloads move real bytes through us → show size + speed. FXP is
         // server-to-server (no bytes flow through the app) → show a file count.
-        if (job.Type == JobType.Download)
+        if (job.Type is JobType.Download or JobType.Upload)
         {
             var pct = job.Percent >= 0 ? $"{job.Percent}% · " : "";
             var size = job.BytesTotal > 0 ? $"{HumanSize(job.BytesDone)}/{HumanSize(job.BytesTotal)}" : HumanSize(job.CumulativeBytes);
@@ -1201,6 +1719,8 @@
         var cur = string.IsNullOrEmpty(job.CurrentFile) ? "" : $" · {job.CurrentFile}";
         return $"{count}{bytes}{speed}{cur}";
     }
+
+    private static string MovedLabel(Job job) => job.Type == JobType.Race ? "raced" : "transferred";
 
     private static string PJoin(string basePath, string name)
     {
@@ -1240,6 +1760,13 @@
         None,
         Pane,
         Queue,
+    }
+
+    private enum ViewerMode
+    {
+        Auto,
+        Text,
+        Image,
     }
 
     private sealed class BrowserTab
@@ -1282,8 +1809,10 @@
     private sealed class PaneSnapshot
     {
         public string Site { get; set; } = "";
+        public string LastSite { get; set; } = "";
         public string Path { get; set; } = "/";
         public string SortColumn { get; set; } = "name";
         public bool SortDesc { get; set; }
+        public List<string> ColumnOrder { get; set; } = new();
     }
 }
