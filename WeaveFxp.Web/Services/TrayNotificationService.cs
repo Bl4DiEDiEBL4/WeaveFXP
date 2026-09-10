@@ -17,6 +17,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
     private const uint MenuTestNotification = 1004;
     private const uint MenuStopEngine = 1005;
     private const uint MenuQuit = 1006;
+    private const uint MenuToggleConsole = 1007;
 
     private readonly WeaveEngine _engine;
     private readonly IHostApplicationLifetime _lifetime;
@@ -35,6 +36,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
     private uint _taskbarCreatedMessage;
     private bool _iconOwned;
     private bool _trayAdded;
+    private bool _startupConsoleHandled;
     private bool _disposed;
     private string _status = "Not started";
 
@@ -48,6 +50,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        DisableConsoleCloseButton();
         _engine.Changed += OnEngineChanged;
         foreach (var job in _engine.Jobs().Where(j => j.Terminal))
             _notifiedJobs.Add(job.Id);
@@ -97,6 +100,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
 
         EnsureTrayStarted();
         RefreshTrayIcon();
+        HideStartupConsoleOnceTrayIsReady();
     }
 
     private void NotifyFinishedJobs()
@@ -291,6 +295,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
         {
             var settings = _engine.Settings(false);
             NativeMethods.AppendMenu(menu, MenuFlags.String, new UIntPtr(MenuOpen), "Open WeaveFXP");
+            NativeMethods.AppendMenu(menu, MenuFlags.String, new UIntPtr(MenuToggleConsole), ConsoleIsVisible() ? "Hide console" : "Show console");
             NativeMethods.AppendMenu(menu, MenuFlags.Separator, UIntPtr.Zero, null);
             NativeMethods.AppendMenu(menu, MenuFlags.String | (settings.TransferNotificationsEnabled ? MenuFlags.Checked : MenuFlags.None), new UIntPtr(MenuToggleTransferNotifications), "Transfer notifications");
             NativeMethods.AppendMenu(menu, MenuFlags.String | (settings.ApiNotificationsEnabled ? MenuFlags.Checked : MenuFlags.None), new UIntPtr(MenuToggleApiNotifications), "API notifications");
@@ -319,6 +324,9 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
         {
             case MenuOpen:
                 OpenDashboard();
+                break;
+            case MenuToggleConsole:
+                ToggleConsole();
                 break;
             case MenuToggleTransferNotifications:
                 ToggleSettings(s => s.TransferNotificationsEnabled = !s.TransferNotificationsEnabled);
@@ -457,6 +465,53 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
         var settings = _engine.Settings(false);
         var host = settings.WebBindAddress is "0.0.0.0" or "*" ? "127.0.0.1" : settings.WebBindAddress;
         OpenBrowser($"http://{host}:{settings.WebPort}/");
+    }
+
+    private void HideStartupConsoleOnceTrayIsReady()
+    {
+        if (_startupConsoleHandled || !IsPackagedExecutable()) return;
+        lock (_gate)
+        {
+            if (_startupConsoleHandled || !_trayAdded) return;
+            _startupConsoleHandled = true;
+        }
+        SetConsoleVisible(false);
+    }
+
+    private static bool IsPackagedExecutable() =>
+        Path.GetFileName(Environment.ProcessPath ?? "").Equals("WeaveFXP.exe", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ConsoleIsVisible()
+    {
+        var window = NativeMethods.GetConsoleWindow();
+        return window != IntPtr.Zero && NativeMethods.IsWindowVisible(window);
+    }
+
+    private static void ToggleConsole() => SetConsoleVisible(!ConsoleIsVisible());
+
+    private static void SetConsoleVisible(bool visible)
+    {
+        var window = NativeMethods.GetConsoleWindow();
+        if (window == IntPtr.Zero) return;
+        DisableConsoleCloseButton(window);
+        NativeMethods.ShowWindow(window, visible ? 9 : 0);
+        if (visible) NativeMethods.SetForegroundWindow(window);
+    }
+
+    private static void DisableConsoleCloseButton()
+    {
+        if (!OperatingSystem.IsWindows() || !IsPackagedExecutable()) return;
+        DisableConsoleCloseButton(NativeMethods.GetConsoleWindow());
+    }
+
+    private static void DisableConsoleCloseButton(IntPtr window)
+    {
+        if (window == IntPtr.Zero) return;
+        var menu = NativeMethods.GetSystemMenu(window, false);
+        if (menu == IntPtr.Zero) return;
+        NativeMethods.EnableMenuItem(menu, NativeMethods.ScClose,
+            NativeMethods.MfByCommand | NativeMethods.MfGrayed);
+        NativeMethods.DrawMenuBar(window);
     }
 
     private static void OpenBrowser(string target)
@@ -632,9 +687,19 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
         [DllImport("user32.dll", SetLastError = true)] public static extern uint TrackPopupMenuEx(IntPtr menu, TrackPopupMenuFlags flags, int x, int y, IntPtr hwnd, IntPtr reserved);
         [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetCursorPos(out Point point);
         [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr GetSystemMenu(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool revert);
+        [DllImport("user32.dll", SetLastError = true)] public static extern uint EnableMenuItem(IntPtr hMenu, uint item, uint enable);
+        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool DrawMenuBar(IntPtr hWnd);
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr LoadImage(IntPtr hinst, string name, ImageType type, int cx, int cy, LoadImageFlags flags);
         [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr LoadIcon(IntPtr hInstance, IntPtr iconName);
         [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool DestroyIcon(IntPtr hIcon);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr GetModuleHandle(string? moduleName);
+        [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+
+        public const uint ScClose = 0xF060;
+        public const uint MfByCommand = 0x00000000;
+        public const uint MfGrayed = 0x00000001;
     }
 }

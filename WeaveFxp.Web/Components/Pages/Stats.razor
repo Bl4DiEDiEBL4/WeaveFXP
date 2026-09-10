@@ -303,7 +303,18 @@
         _process.Dispose();
     }
 
-    private void OnChanged() => _ = InvokeAsync(() => { Refresh(); StateHasChanged(); });
+    private int _refreshQueued;
+
+    private void OnChanged()
+    {
+        if (Interlocked.Exchange(ref _refreshQueued, 1) != 0) return;
+        _ = InvokeAsync(() =>
+        {
+            Interlocked.Exchange(ref _refreshQueued, 0);
+            Refresh();
+            StateHasChanged();
+        });
+    }
 
     private void Refresh() => _stats = Engine.SiteStats();
 

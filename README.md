@@ -1,4 +1,4 @@
-# WeaveFXP v1.0.1
+# WeaveFXP v1.0.2
 
 WeaveFXP is a self-hosted FXP client with a dark web UI, a headless transfer
 engine and a JSON API. It is built for site-to-site racing, manual browsing and
@@ -17,9 +17,9 @@ engine runs in the same process.
 
 Choose the release for your machine:
 
-- Windows: `WeaveFXP-v1.0.1-win-x64.zip`
-- Linux PC/server: `WeaveFXP-v1.0.1-linux-x64.zip`
-- Linux ARM64: `WeaveFXP-v1.0.1-linux-arm64.zip`
+- Windows: `WeaveFXP-v1.0.2-win-x64.zip`
+- Linux PC/server: `WeaveFXP-v1.0.2-linux-x64.zip`
+- Linux ARM64: `WeaveFXP-v1.0.2-linux-arm64.zip`
 
 1. Download the release for your platform.
 2. Extract the executable into its own folder, for example `D:\WeaveFXP`.
@@ -118,9 +118,9 @@ The publish scripts create:
 Release\win-x64\WeaveFXP.exe
 Release\linux-x64\WeaveFXP
 Release\linux-arm64\WeaveFXP
-Release\zips\WeaveFXP-v1.0.1-win-x64.zip
-Release\zips\WeaveFXP-v1.0.1-linux-x64.zip
-Release\zips\WeaveFXP-v1.0.1-linux-arm64.zip
+Release\zips\WeaveFXP-v1.0.2-win-x64.zip
+Release\zips\WeaveFXP-v1.0.2-linux-x64.zip
+Release\zips\WeaveFXP-v1.0.2-linux-arm64.zip
 ```
 
 Ship the zip for the target platform. Runtime `data` is not included in release
@@ -141,6 +141,26 @@ set WEAVEFXP_STATE=D:\WeaveFXP\data\state.json
 ```
 
 ## Changelog
+
+### v1.0.2 - 2026-09-10
+
+- Added native `SITE SEARCH` in the UI and API; recursive scanning is explicitly opt-in with `recursive: true`, with no automatic fallback on unsupported servers.
+- Added manual queue Move up/Move down and Remove all, shared site/login limits, per-site local queues and cancellation when disconnecting a site pane.
+- Added live local SFV folder banners and CRC32 calculation during downloads to accelerate final verification.
+- Added a shared mesh scoreboard with cross-race priority, equal-score rotation, route-speed-aware scheduling and shared destination-file claims.
+- Corrected in-progress 553/X-DUPE handling, fresh-listing completion checks and source failover without treating permission refusals as successful duplicates.
+- Share released site capacity with newly announced races while allowing a single race to use all configured transfer slots.
+- Removed blocking destination setup from the announce path and let the first transfer create its required directory safely.
+- Kept site sessions warm, paced connection warm-up and corrected poll timing to reduce announce-to-first-STOR latency.
+- Prioritized hot root listings, refreshed nested directories separately and retried growing or upload-busy source files sooner.
+- Improved completion detection so releases completed by another racer stop promptly instead of idling for a minute or becoming false failures.
+- Added global SOCKS5/SOCKS5H/HTTP proxy settings for FTP control and data connections, including authentication and data-route overrides.
+- Added full cbftp/RaceTrade-compatible site creation and update handling for copying sites between servers.
+- Added removable default global skip patterns for `.tvmaze`, `.imdb`, `file_id.diz` and `.txt`.
+- Added Favorites with preserved pane positions, local ALL slot settings, panel Save buttons and a browser-at-startup toggle enabled by default.
+- Added cbftp JSON import, slftp encrypted UDP compatibility and persistent UI palettes.
+
+See the [full v1.0.2 release notes](docs/releases/v1.0.2.md), including upgrade instructions and validation limits. The regression runner currently passes 124 checks; throughput parity with cbftp has not been benchmarked.
 
 ### v1.0.1
 

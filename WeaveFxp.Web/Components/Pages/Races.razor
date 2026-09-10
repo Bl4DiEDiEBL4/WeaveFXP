@@ -9,7 +9,7 @@
         <div>
             <div class="eyebrow">Racing</div>
             <h2><span class="title-icon">⚑</span> Races</h2>
-            <p class="page-sub">@Active.Count running · @Filtered.Count race(s) total. The browser queue only shows manual transfers.</p>
+            <p class="page-sub">@ActiveGroups.Count running · @FilteredGroups.Count race(s) total. The browser queue only shows manual transfers.</p>
         </div>
         <div class="page-actions">
             <button class="secondary" @onclick="Refresh"><span class="btn-icon">↻</span> Refresh</button>
@@ -27,7 +27,7 @@
                 }
             </select>
             <span class="spacer"></span>
-            <span class="hint">@Filtered.Count race(s)</span>
+            <span class="hint">@FilteredGroups.Count race(s)</span>
         </div>
 
         <div class="table-wrap">
@@ -55,43 +55,43 @@
                     </tr>
                 </thead>
                 <tbody>
-                    @if (Filtered.Count == 0)
+                    @if (FilteredGroups.Count == 0)
                     {
                         <tr><td colspan="8" class="dim">No races yet. Start one from the browser (race spread) or over the API.</td></tr>
                     }
-                    @foreach (var job in Filtered.Take(200))
+                    @foreach (var race in FilteredGroups.Take(200))
                     {
-                        <tr id="race-@job.Id" class="race-row @(IsOpen(job) ? "open" : "")" @onclick="() => ToggleLog(job)">
-                            <td class="mono col-time">@Local(job.CreatedAt)</td>
+                        <tr id="race-@race.Primary.Id" class="race-row @(IsOpen(race) ? "open" : "")" @onclick="() => ToggleLog(race)">
+                            <td class="mono col-time">@Local(RaceCreatedAt(race))</td>
                             <td class="col-state">
-                                <span class="pill @StateClass(job.State)" title="@job.Error">@job.State</span>
-                                @if (job.Paused)
+                                <span class="pill @StateClass(RaceState(race))" title="@RaceError(race)">@RaceState(race)</span>
+                                @if (RacePaused(race))
                                 {
                                     <span class="pill amber">paused</span>
                                 }
                             </td>
-                            <td class="mono col-runtime">@RaceRuntime(job)</td>
-                            <td class="strong race-name" title="@job.Request.SourcePath → @job.Request.DestPath">@RaceName(job)</td>
-                            <td class="col-route">@RaceRoute(job)</td>
-                            <td class="mono race-section" title="@job.Request.SourcePath → @job.Request.DestPath">@RaceSections(job)</td>
+                            <td class="mono col-runtime">@RaceRuntime(race)</td>
+                            <td class="strong race-name" title="@RacePathTitle(race)">@RaceName(race.Primary)</td>
+                            <td class="col-route">@RaceRoute(race)</td>
+                            <td class="mono race-section" title="@RacePathTitle(race)">@RaceSections(race)</td>
                             <td class="col-progress">
-                                @if (job.State == JobState.Running)
+                                @if (RaceState(race) == JobState.Running)
                                 {
                                     <span class="job-prog wide">
                                         <span class="job-bar">
-                                            <span class="job-bar-fill @(job.Percent < 0 ? "indet" : "")"
-                                                  style="width:@RacePercent(job)%"></span>
+                                            <span class="job-bar-fill @(RaceTotalFiles(race) <= 0 ? "indet" : "")"
+                                                  style="width:@RacePercent(race)%"></span>
                                         </span>
-                                        <span class="job-prog-text">@ProgressText(job)</span>
+                                        <span class="job-prog-text">@ProgressText(race)</span>
                                     </span>
                                 }
-                                else if (HasRaceProgress(job) || job.FilesDone > 0 || job.CumulativeBytes > 0)
+                                else if (HasRaceProgress(race))
                                 {
                                     <span class="job-prog wide">
                                         <span class="job-bar">
-                                            <span class="job-bar-fill" style="width:@RacePercent(job)%"></span>
+                                            <span class="job-bar-fill" style="width:@RacePercent(race)%"></span>
                                         </span>
-                                        <span class="job-prog-text">@ProgressText(job)</span>
+                                        <span class="job-prog-text">@ProgressText(race)</span>
                                     </span>
                                 }
                                 else
@@ -100,30 +100,51 @@
                                 }
                             </td>
                             <td class="col-actions" @onclick:stopPropagation="true">
-                                @if (job.State is JobState.Queued or JobState.Running)
+                                @if (RaceActive(race))
                                 {
-                                    @if (job.Paused)
+                                    @if (RacePaused(race))
                                     {
-                                        <button class="secondary slim" @onclick="() => Resume(job)">Resume</button>
+                                        <button class="secondary slim" @onclick="() => Resume(race)">Resume</button>
                                     }
                                     else
                                     {
-                                        <button class="secondary slim" @onclick="() => Pause(job)">Pause</button>
+                                        <button class="secondary slim" @onclick="() => Pause(race)">Pause</button>
                                     }
-                                    <button class="secondary slim danger" @onclick="() => Stop(job)">Stop</button>
+                                    <button class="secondary slim danger" @onclick="() => Stop(race)">Stop</button>
                                 }
                                 else
                                 {
-                                    <button class="secondary slim" @onclick="() => Retry(job)">Retry</button>
-                                    <button class="secondary slim danger" @onclick="() => Remove(job)">Remove</button>
+                                    <button class="secondary slim" @onclick="() => Retry(race)">Retry</button>
+                                    <button class="secondary slim danger" @onclick="() => Remove(race)">Remove</button>
                                 }
                             </td>
                         </tr>
-                        @if (IsOpen(job))
+                        @if (IsOpen(race))
                         {
                             <tr class="race-log-row">
                                 <td colspan="8">
-                                    @if (job.Files.Any(f => !IsMissingMarkerRow(f)))
+                                    <div class="race-mesh-summary">
+                                        <div class="race-site-list">
+                                            <span class="race-summary-label">Sites</span>
+                                            @foreach (var site in RaceSites(race))
+                                            {
+                                                <span class="race-site-chip">@site</span>
+                                            }
+                                        </div>
+                                        <div class="race-route-list">
+                                            <span class="race-summary-label">Routes</span>
+                                            @foreach (var route in RaceRoutes(race))
+                                            {
+                                                <span class="race-route-chip">
+                                                    <strong>@route.From → @route.To</strong>
+                                                    <span>@route.Done raced</span>
+                                                    @if (route.Active > 0) { <span>@route.Active active</span> }
+                                                    @if (route.Bytes > 0) { <span>@HumanSize(route.Bytes)</span> }
+                                                </span>
+                                            }
+                                        </div>
+                                    </div>
+                                    @if (RaceFiles(race).Count > 0)
                                     {
                                         <table class="data-table file-table">
                                             <colgroup>
@@ -151,13 +172,14 @@
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                @foreach (var ft in FilesNewestFirst(job))
+                                                @foreach (var row in RaceFiles(race))
                                                 {
+                                                    var ft = row.Transfer;
                                                     <tr>
                                                         <td class="mono">@ft.StartedAt.ToLocalTime().ToString("HH:mm:ss")</td>
                                                         <td class="mono">@Elapsed(ft)</td>
-                                                        <td class="mono route-cell">@RaceRoute(job)</td>
-                                                        <td class="mono path-cell" title="@TransferPath(job, ft)">@TransferPath(job, ft)</td>
+                                                        <td class="mono route-cell">@FileRoute(row)</td>
+                                                        <td class="mono path-cell" title="@TransferPath(row.Job, ft)">@TransferPath(row.Job, ft)</td>
                                                         <td class="mono transferred-cell">@Transferred(ft)</td>
                                                         <td class="mono file-name" title="@FileTitle(ft)">@ft.Name</td>
                                                         <td class="mono">@Left(ft)</td>
@@ -168,15 +190,18 @@
                                             </tbody>
                                         </table>
                                     }
-                                    <details class="race-raw-log">
-                                        <summary>Raw log (@job.Events.Count lines)</summary>
-                                        <ul class="events">
-                                            @foreach (var ev in job.Events)
-                                            {
-                                                <li class="lvl-@ev.Level">[@ev.Time.ToLocalTime().ToString("HH:mm:ss")] @ev.Level: @ev.Message</li>
-                                            }
-                                        </ul>
-                                    </details>
+                                    @foreach (var job in race.Jobs)
+                                    {
+                                        <details class="race-raw-log">
+                                            <summary>@RaceRoute(job) · Raw log (@job.Events.Count lines)</summary>
+                                            <ul class="events">
+                                                @foreach (var ev in job.Events)
+                                                {
+                                                    <li class="lvl-@ev.Level">[@ev.Time.ToLocalTime().ToString("HH:mm:ss")] @ev.Level: @ev.Message</li>
+                                                }
+                                            </ul>
+                                        </details>
+                                    }
                                 </td>
                             </tr>
                         }
@@ -193,7 +218,23 @@
 }
 
 @code {
+    private sealed record RaceGroup(string Key, List<Job> Jobs)
+    {
+        public Job Primary => Jobs[0];
+    }
+
+    private sealed record RaceFileRow(Job Job, FileTransfer Transfer);
+    private sealed class RouteSummary
+    {
+        public required string From { get; init; }
+        public required string To { get; init; }
+        public int Done { get; set; }
+        public int Active { get; set; }
+        public long Bytes { get; set; }
+    }
+
     private List<Job> _jobs = new();
+    private List<RaceGroup> _raceGroups = new();
     private List<Site> _sites = new();
     // path (e.g. "/!Today_FLAC") on a given site -> its configured section NAME.
     private readonly Dictionary<string, string> _sectionNames = new(StringComparer.OrdinalIgnoreCase);
@@ -242,44 +283,73 @@
 
     public void Dispose() => Engine.Changed -= OnChanged;
 
-    private void OnChanged() => _ = InvokeAsync(() => { Refresh(); StateHasChanged(); });
+    private int _refreshQueued;
 
-    private void Refresh() => _jobs = Engine.Jobs();
+    private void OnChanged()
+    {
+        if (Interlocked.Exchange(ref _refreshQueued, 1) != 0) return;
+        _ = InvokeAsync(() =>
+        {
+            Interlocked.Exchange(ref _refreshQueued, 0);
+            Refresh();
+            StateHasChanged();
+        });
+    }
 
-    private List<Job> Filtered
+    private void Refresh()
+    {
+        _jobs = Engine.Jobs();
+        _raceGroups = _jobs
+            .Where(j => j.Type == JobType.Race)
+            .GroupBy(j => string.IsNullOrWhiteSpace(j.BatchId) ? j.Id : j.BatchId, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new RaceGroup(g.Key, g.OrderBy(j => j.CreatedAt).ToList()))
+            .OrderByDescending(RaceCreatedAt)
+            .ToList();
+    }
+
+    private List<RaceGroup> RaceGroups => _raceGroups;
+
+    private List<RaceGroup> FilteredGroups
     {
         get
         {
-            IEnumerable<Job> q = _jobs.Where(j => j.Type == JobType.Race);
+            IEnumerable<RaceGroup> q = RaceGroups;
             if (!string.IsNullOrWhiteSpace(_state) && Enum.TryParse<JobState>(_state, out var st))
-                q = q.Where(j => j.State == st);
+                q = q.Where(r => RaceState(r) == st);
             if (!string.IsNullOrWhiteSpace(_query))
             {
                 var needle = _query.Trim();
-                q = q.Where(j =>
+                q = q.Where(r => r.Jobs.Any(j =>
+                    RaceName(j).Contains(needle, StringComparison.OrdinalIgnoreCase) ||
                     j.Request.SourcePath.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
                     j.Request.DestPath.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
                     j.Request.FromSite.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
                     j.Request.ToSite.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
-                    j.Request.MeshSites.Any(s => s.Contains(needle, StringComparison.OrdinalIgnoreCase)));
+                    j.Request.MeshSites.Any(s => s.Contains(needle, StringComparison.OrdinalIgnoreCase))));
             }
             return q.ToList();
         }
     }
 
-    private List<Job> Active => _jobs.Where(j => j.Type == JobType.Race && j.State is JobState.Queued or JobState.Running).ToList();
+    private List<RaceGroup> ActiveGroups => RaceGroups.Where(RaceActive).ToList();
 
-    private bool IsOpen(Job job) => _open.Contains(job.Id);
+    private bool IsOpen(RaceGroup race) =>
+        _open.Contains(race.Key) || race.Jobs.Any(j => _open.Contains(j.Id));
 
-    private void ToggleLog(Job job)
+    private void ToggleLog(RaceGroup race)
     {
-        if (!_open.Add(job.Id)) _open.Remove(job.Id);
+        var open = IsOpen(race);
+        _open.Remove(race.Key);
+        foreach (var job in race.Jobs) _open.Remove(job.Id);
+        if (!open) _open.Add(race.Key);
     }
 
-    private static List<FileTransfer> FilesNewestFirst(Job job) =>
-        job.Files
-            .Where(f => !IsMissingMarkerRow(f))
-            .OrderByDescending(f => f.StartedAt)
+    private static List<RaceFileRow> RaceFiles(RaceGroup race) =>
+        race.Jobs
+            .SelectMany(j => j.Files
+                .Where(f => !IsMissingMarkerRow(f))
+                .Select(f => new RaceFileRow(j, f)))
+            .OrderByDescending(x => x.Transfer.StartedAt)
             .ToList();
 
     private static string Elapsed(FileTransfer ft)
@@ -305,10 +375,26 @@
 
     private static string TransferPath(Job job, FileTransfer ft)
     {
-        var source = JoinRemote(ParentPath(job.Request.SourcePath), ParentPath(ft.Name));
-        var dest = JoinRemote(ParentPath(job.Request.DestPath), ParentPath(ft.Name));
+        var sourceBase = SitePath(job, ft.FromSite, job.Request.SourcePath);
+        var destBase = SitePath(job, ft.ToSite, job.Request.DestPath);
+        var source = JoinRemote(ParentPath(sourceBase), ParentPath(ft.Name));
+        var dest = JoinRemote(ParentPath(destBase), ParentPath(ft.Name));
         return source.Equals(dest, StringComparison.OrdinalIgnoreCase) ? source : $"{source} → {dest}";
     }
+
+    private static string SitePath(Job job, string site, string fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(site) &&
+            job.Request.SitePaths.TryGetValue(site, out var path) &&
+            !string.IsNullOrWhiteSpace(path))
+            return path;
+        return fallback;
+    }
+
+    private static string FileRoute(RaceFileRow row) =>
+        !string.IsNullOrWhiteSpace(row.Transfer.FromSite) && !string.IsNullOrWhiteSpace(row.Transfer.ToSite)
+            ? $"{row.Transfer.FromSite} → {row.Transfer.ToSite}"
+            : RaceRoute(row.Job);
 
     private static string Transferred(FileTransfer ft) =>
         ft.Status == "done"
@@ -361,10 +447,80 @@
         return src.Equals(dst, StringComparison.OrdinalIgnoreCase) ? src : $"{src} → {dst}";
     }
 
+    private string RaceSections(RaceGroup race) => string.Join(" / ", race.Jobs
+        .Select(RaceSections)
+        .Where(s => !string.IsNullOrWhiteSpace(s))
+        .Distinct(StringComparer.OrdinalIgnoreCase));
+
     private static string RaceRoute(Job job) =>
         job.Request.MeshSites.Count > 1
             ? string.Join(" ↔ ", job.Request.MeshSites)
             : $"{job.Request.FromSite} → {job.Request.ToSite}";
+
+    private static List<string> RaceSites(RaceGroup race) => race.Jobs
+        .SelectMany(j => j.Request.MeshSites.Count > 1
+            ? j.Request.MeshSites.AsEnumerable()
+            : new[] { j.Request.FromSite, j.Request.ToSite })
+        .Where(s => !string.IsNullOrWhiteSpace(s))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    private static string RaceRoute(RaceGroup race) => string.Join(" ↔ ", RaceSites(race));
+
+    private List<RouteSummary> RaceRoutes(RaceGroup race)
+    {
+        var routes = new Dictionary<string, RouteSummary>(StringComparer.OrdinalIgnoreCase);
+        void Add(string from, string to)
+        {
+            if (string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(to) || from.Equals(to, StringComparison.OrdinalIgnoreCase)) return;
+            var key = from + "|" + to;
+            routes.TryAdd(key, new RouteSummary { From = from, To = to });
+        }
+
+        foreach (var job in race.Jobs)
+        {
+            if (job.Request.MeshSites.Count > 1)
+            {
+                var sites = job.Request.MeshSites
+                    .Select(name => _sites.FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                    .Where(s => s is not null)
+                    .Cast<Site>()
+                    .ToList();
+                foreach (var from in sites)
+                    foreach (var to in sites)
+                        if (Engine.TransferAllowed(from, to)) Add(from.Name, to.Name);
+            }
+            else Add(job.Request.FromSite, job.Request.ToSite);
+        }
+
+        foreach (var row in RaceFiles(race))
+        {
+            var ft = row.Transfer;
+            var from = string.IsNullOrWhiteSpace(ft.FromSite) ? row.Job.Request.FromSite : ft.FromSite;
+            var to = string.IsNullOrWhiteSpace(ft.ToSite) ? row.Job.Request.ToSite : ft.ToSite;
+            Add(from, to);
+            if (!routes.TryGetValue(from + "|" + to, out var route)) continue;
+            if (ft.Status == "done") { route.Done++; route.Bytes += Math.Max(0, ft.Size); }
+            if (ft.Status == "active") route.Active++;
+        }
+        return routes.Values.OrderBy(r => r.From).ThenBy(r => r.To).ToList();
+    }
+
+    private static DateTime RaceCreatedAt(RaceGroup race) => race.Jobs.Min(j => j.CreatedAt);
+
+    private static JobState RaceState(RaceGroup race)
+    {
+        if (race.Jobs.Any(j => j.State == JobState.Running)) return JobState.Running;
+        if (race.Jobs.Any(j => j.State == JobState.Queued)) return JobState.Queued;
+        if (race.Jobs.Any(j => j.State == JobState.Failed)) return JobState.Failed;
+        if (race.Jobs.All(j => j.State == JobState.Cancelled)) return JobState.Cancelled;
+        return JobState.Succeeded;
+    }
+
+    private static bool RaceActive(RaceGroup race) => race.Jobs.Any(j => j.State is JobState.Queued or JobState.Running);
+    private static bool RacePaused(RaceGroup race) => race.Jobs.Any(j => (j.State is JobState.Queued or JobState.Running) && j.Paused);
+    private static string RaceError(RaceGroup race) => string.Join("; ", race.Jobs.Select(j => j.Error).Where(e => !string.IsNullOrWhiteSpace(e)).Distinct());
+    private static string RacePathTitle(RaceGroup race) => string.Join(" | ", race.Jobs.Select(j => $"{j.Request.SourcePath} → {j.Request.DestPath}").Distinct());
 
     private string SectionNameFor(string site, string path)
     {
@@ -389,11 +545,17 @@
         return left == "/" ? "/" + right : left + "/" + right;
     }
 
-    private void Pause(Job job) { if (!Engine.PauseJob(job.Id)) Toast($"Cannot pause {job.Id}"); }
-    private void Resume(Job job) { if (!Engine.ResumeJob(job.Id)) Toast($"Cannot resume {job.Id}"); }
-    private void Stop(Job job) { if (!Engine.CancelJob(job.Id, "Stopped by user")) Toast($"Cannot stop {job.Id}"); }
-    private void Retry(Job job) { if (!Engine.RetryJob(job.Id)) Toast($"Cannot retry {job.Id}"); }
-    private void Remove(Job job) { if (!Engine.RemoveJob(job.Id)) Toast($"Cannot remove {job.Id}"); }
+    private void Pause(RaceGroup race) => RunForRace(race, j => (j.State is JobState.Queued or JobState.Running) && !j.Paused, Engine.PauseJob, "pause");
+    private void Resume(RaceGroup race) => RunForRace(race, j => (j.State is JobState.Queued or JobState.Running) && j.Paused, Engine.ResumeJob, "resume");
+    private void Stop(RaceGroup race) => RunForRace(race, j => j.State is JobState.Queued or JobState.Running, id => Engine.CancelJob(id, "Stopped by user"), "stop");
+    private void Retry(RaceGroup race) => RunForRace(race, j => j.Terminal, Engine.RetryJob, "retry");
+    private void Remove(RaceGroup race) => RunForRace(race, j => j.Terminal, Engine.RemoveJob, "remove");
+
+    private void RunForRace(RaceGroup race, Func<Job, bool> select, Func<string, bool> action, string verb)
+    {
+        var failed = race.Jobs.Where(select).Count(j => !action(j.Id));
+        if (failed > 0) Toast($"Could not {verb} {failed} race route(s)");
+    }
 
     private void Toast(string message)
     {
@@ -436,31 +598,44 @@
         return $"{v.ToString(v >= 100 ? "0" : "0.0")} {units[u]}";
     }
 
-    private static string ProgressText(Job job)
+    private static string ProgressText(RaceGroup race)
     {
-        var covered = RaceCoveredFiles(job);
-        var total = RaceTotalFiles(job);
-        var raced = RaceRacedFiles(job);
-        var racedBytes = RaceRacedBytes(job);
+        var covered = RaceCoveredFiles(race);
+        var total = RaceTotalFiles(race);
+        var raced = RaceRacedFiles(race);
+        var racedBytes = RaceRacedBytes(race);
         var count = total > 0 ? $"{covered}/{total} files covered" : $"{covered} files covered";
         var racedFiles = $" · {raced} {(raced == 1 ? "file" : "files")} raced";
-        var bytes = job.BytesTotal > 0
-            ? $" · {HumanSize(racedBytes)} raced of {HumanSize(job.BytesTotal)}"
+        var totalBytes = race.Jobs.Max(j => j.BytesTotal);
+        var bytes = totalBytes > 0
+            ? $" · {HumanSize(racedBytes)} raced of {HumanSize(totalBytes)}"
             : racedBytes > 0 ? $" · {HumanSize(racedBytes)} raced" : "";
-        var speed = job.SpeedBps > 0 ? $" · {Speed(job.SpeedBps)}" : "";
+        var raceSpeed = race.Jobs.Sum(j => j.SpeedBps);
+        var speed = raceSpeed > 0 ? $" · {Speed(raceSpeed)}" : "";
         return $"{count}{racedFiles}{bytes}{speed}";
     }
 
-    private static int RacePercent(Job job)
+    private static int RacePercent(RaceGroup race)
     {
-        if (job.State == JobState.Succeeded) return 100;
-        var total = RaceTotalFiles(job);
-        if (total > 0) return (int)Math.Clamp((long)RaceCoveredFiles(job) * 100 / total, 0, 100);
-        return job.Percent < 0 ? 100 : job.Percent;
+        if (RaceState(race) == JobState.Succeeded) return 100;
+        var total = RaceTotalFiles(race);
+        if (total > 0) return (int)Math.Clamp((long)RaceCoveredFiles(race) * 100 / total, 0, 100);
+        return Math.Max(0, race.Jobs.Max(j => j.Percent));
     }
 
-    private static bool HasRaceProgress(Job job) =>
-        job.Type == JobType.Race && (job.FilesTotal > 0 || job.BytesTotal > 0 || job.Files.Any(f => !IsMissingMarkerRow(f)));
+    private static bool HasRaceProgress(RaceGroup race) =>
+        race.Jobs.Any(j => j.FilesTotal > 0 || j.BytesTotal > 0 || j.Files.Any(f => !IsMissingMarkerRow(f)));
+
+    private static int RaceTotalFiles(RaceGroup race) => race.Jobs.Max(RaceTotalFiles);
+
+    private static int RaceCoveredFiles(RaceGroup race)
+    {
+        var values = race.Jobs.Where(j => RaceTotalFiles(j) > 0).Select(RaceCoveredFiles).ToList();
+        return values.Count == 0 ? 0 : values.Min();
+    }
+
+    private static int RaceRacedFiles(RaceGroup race) => race.Jobs.Sum(RaceRacedFiles);
+    private static long RaceRacedBytes(RaceGroup race) => race.Jobs.Sum(RaceRacedBytes);
 
     private static int RaceTotalFiles(Job job) =>
         Math.Max(job.FilesTotal, job.Files
@@ -476,7 +651,7 @@
             .Select(f => f.Name)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Count();
-        return Math.Max(job.FilesDone, coveredNames);
+        return Math.Max(job.FilesCovered, Math.Max(job.FilesDone, coveredNames));
     }
 
     private static int RaceRacedFiles(Job job) =>
@@ -490,11 +665,13 @@
     private static bool IsMissingMarkerRow(FileTransfer ft) =>
         ft.Name.EndsWith("-MISSING", StringComparison.OrdinalIgnoreCase);
 
-    private static string RaceRuntime(Job job)
+    private static string RaceRuntime(RaceGroup race)
     {
-        var start = job.StartedAt == default ? job.CreatedAt : job.StartedAt;
+        var start = race.Jobs.Min(j => j.StartedAt == default ? j.CreatedAt : j.StartedAt);
         if (start == default) return "—";
-        var end = job.Terminal && job.FinishedAt != default ? job.FinishedAt : DateTime.UtcNow;
+        var end = RaceActive(race)
+            ? DateTime.UtcNow
+            : race.Jobs.Max(j => j.FinishedAt == default ? j.CreatedAt : j.FinishedAt);
         var elapsed = end > start ? end - start : TimeSpan.Zero;
         if (elapsed.TotalHours >= 1) return $"{(int)elapsed.TotalHours}:{elapsed.Minutes:00}:{elapsed.Seconds:00}";
         if (elapsed.TotalMinutes >= 1) return $"{(int)elapsed.TotalMinutes}:{elapsed.Seconds:00}";

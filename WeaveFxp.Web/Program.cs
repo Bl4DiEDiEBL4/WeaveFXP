@@ -7,7 +7,9 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.DataProtection;
 using WeaveFxp.Web.Services;
+using WeaveFxp.Web.Compatibility;
 using WeaveFxp.Engine.Core;
+using WeaveFxp.Engine.Compatibility;
 using WeaveFxp.Engine.Models;
 using WeaveFxp.Web.Components;
 
@@ -20,6 +22,13 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     ContentRootPath = appDir,
     WebRootPath = ResolveWebRoot(appDir)
 });
+
+// The default Windows Event Log provider can throw for non-admin desktop users
+// when its source has not been registered. Keep host diagnostics local instead;
+// application/runtime history is already persisted by the engine.
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+builder.Logging.AddDebug();
 
 // The engine addresses its state relative to the executable (data/state.json).
 builder.Services.AddSingleton(engine);
@@ -169,6 +178,22 @@ api.MapDelete("/sites/{name}", (string name) =>
     return Results.NoContent();
 });
 api.MapGet("/jobs", () => engine.Jobs());
+api.MapPost("/searches", (SiteSearchRequest request) => SearchAction(() =>
+{
+    var search = engine.StartSiteSearch(request);
+    return Results.Accepted($"/api/searches/{search.Id}", search);
+}));
+api.MapGet("/searches/{id}", (string id, int? offset, int? limit) =>
+    engine.SiteSearch(id, offset ?? 0, limit ?? 100) is { } search ? Results.Ok(search) : Results.NotFound());
+api.MapPost("/searches/{id}/cancel", (string id) =>
+    engine.StopSiteSearch(id) ? Results.Ok(new { cancelled = true }) : Results.NotFound());
+api.MapPost("/searches/{id}/queue", (string id, SiteSearchQueueRequest request) =>
+    SearchAction(() => Results.Ok(engine.QueueSiteSearchResults(id, request))));
+api.MapGet("/searches/{id}/export", (string id) =>
+    engine.SiteSearch(id, 0, 10000) is { } search
+        ? Results.File(JsonSerializer.SerializeToUtf8Bytes(search, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower }),
+            "application/json", $"search-{id}.json")
+        : Results.NotFound());
 api.MapDelete("/jobs/{id}", (string id) => engine.RemoveJob(id) ? Results.Ok(new { removed = true, id }) : Results.NotFound());
 api.MapPost("/jobs/{id}/cancel", (string id) =>
 {
@@ -182,6 +207,8 @@ api.MapPost("/jobs/{id}/retry", (string id) =>
         ? Results.Ok(new { id, retried = true })
         : Results.NotFound();
 });
+api.MapPost("/jobs/{id}/move/{direction:int}", (string id, int direction) =>
+    engine.MoveManualJob(id, direction) ? Results.Ok(new { moved = true }) : Results.Conflict(new { error = "Job cannot move in that direction" }));
 api.MapPost("/jobs/{id}/restart", (string id) =>
 {
     return engine.RestartJob(id)
@@ -189,6 +216,7 @@ api.MapPost("/jobs/{id}/restart", (string id) =>
         : Results.NotFound();
 });
 api.MapDelete("/jobs", () => Results.Ok(new { cleared = engine.ClearJobs() }));
+api.MapDelete("/jobs/manual", () => Results.Ok(new { removed = engine.RemoveManualJobs(engine.Jobs().Select(job => job.Id)) }));
 api.MapGet("/releases", () => engine.Releases());
 api.MapDelete("/releases", () => Results.Ok(new { cleared = engine.ClearReleases() }));
 api.MapGet("/logs", (long? after, int? limit, string? category, string? level) =>
@@ -230,18 +258,29 @@ Console.WriteLine($"Data folder: {engine.DataDir}");
 if (!string.IsNullOrWhiteSpace(engine.LoadWarning))
     Console.WriteLine(engine.LoadWarning);
 
-// Auto-open the dashboard on start (skip with --no-browser).
-if (!args.Contains("--no-browser", StringComparer.OrdinalIgnoreCase))
+// Auto-open the dashboard by default. Settings controls the normal startup path;
+// command-line flags are kept as hard overrides for shortcuts/scripts.
+if (!args.Contains("--no-browser", StringComparer.OrdinalIgnoreCase) &&
+    (startupSettings.AutoOpenWebUi ||
+     args.Contains("--browser", StringComparer.OrdinalIgnoreCase) ||
+     args.Contains("--open-browser", StringComparer.OrdinalIgnoreCase)))
     OpenBrowser(BrowserUrl(listen.WebUrl));
 
-// cbftp-compatible UDP API: dtool and friends send plaintext datagrams like
-// "<password> race <section> <release> <site1>,<site2>". Enable it in Settings.
+// cbftp/slftp-compatible UDP API. It accepts plaintext or slftp's encrypted
+// Salted__ envelope according to the mode selected in Settings.
 StartUdpApi(engine);
 
 app.Run();
 
 // Self-signed certificate for the HTTPS JSON API (cbftp-style). Generated once,
 // persisted in data/keys/api-cert.pfx so the fingerprint stays stable.
+static IResult SearchAction(Func<IResult> action)
+{
+    try { return action(); }
+    catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+    catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+}
+
 static System.Security.Cryptography.X509Certificates.X509Certificate2 LoadOrCreateApiCertificate(string dataDir)
 {
     const string pfxPassword = "weavefxp";
@@ -405,14 +444,23 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
                 max_logins = site.LoginSlots,
                 max_sim_up = site.UploadSlots,
                 max_sim_down = site.DownloadSlots,
+                max_idle_time = site.MaxIdleSeconds,
                 pret = site.UsePret,
-                list_command = string.IsNullOrWhiteSpace(site.ListCommand) ? "STAT_L" : site.ListCommand,
-                tls_mode = site.TlsMode.ToString().ToUpperInvariant(),
+                list_command = CompatListCommand(site.ListCommand),
+                tls_mode = CompatTlsMode(site.TlsMode),
+                tls_transfer_policy = "PREFER_OFF",
+                transfer_protocol = "IPV4_ONLY",
                 sscn = site.UseSscn,
                 cpsv = site.CpsvSupported,
                 cepr = site.CeprSupported,
                 broken_pasv = site.BrokenPasv,
                 disabled = false,
+                leave_free_slot = false,
+                stay_logged_in = false,
+                priority = "NORMAL",
+                list_frequency = "AUTO",
+                proxy_type = "GLOBAL",
+                proxy_name = "",
                 allow_upload = site.BlockTransferTo ? "NO" : "YES",
                 allow_download = site.BlockTransferFrom ? "NO" : "YES",
                 xdupe = site.UseXdupe,
@@ -424,15 +472,41 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
                 except_target_sites = site.ExceptTargetSites,
                 // dtool's line parser finalises source/target lists on this key.
                 force_binary_mode = site.ForceBinary,
-                skiplist = site.Skiplist,
+                skiplist = site.Skiplist.Select(pattern => new
+                {
+                    action = "DENY",
+                    dir = true,
+                    file = true,
+                    pattern,
+                    regex = false,
+                    scope = "ALL",
+                }).ToArray(),
             };
             ctx.Response.ContentType = "application/json; charset=utf-8";
             await ctx.Response.WriteAsync(JsonSerializer.Serialize(siteJson, new JsonSerializerOptions { WriteIndented = true }));
             return true;
         }
 
-        // dtool syncs source/target route exclusions with PATCH /sites/<name>
-        // (cbftp-compatible: except_source_sites / except_target_sites lists).
+        // cbftp/RaceTrade creates a copied site with POST /sites.
+        if (HttpMethods.IsPost(ctx.Request.Method) && path.Equals("/sites", StringComparison.OrdinalIgnoreCase))
+        {
+            using var doc = await ReadJsonBodyAsync(ctx);
+            var site = CbftpSiteImporter.Apply(new Site(), doc.RootElement);
+            if (string.IsNullOrWhiteSpace(site.Name))
+                return await JsonStatus(ctx, StatusCodes.Status400BadRequest, new { error = "name is required" });
+            if (string.IsNullOrWhiteSpace(site.Host))
+                return await JsonStatus(ctx, StatusCodes.Status400BadRequest, new { error = "addresses must contain a valid host" });
+            if (engine.Site(site.Name) is not null)
+                return await JsonStatus(ctx, StatusCodes.Status409Conflict, new { error = $"site '{site.Name}' already exists" });
+
+            var saved = engine.AddSite(site);
+            engine.Log("api", "compat", "info", $"POST {saved.Name}: imported cbftp site ({saved.Host}:{saved.Port})");
+            await Results.Json(new { name = saved.Name }, statusCode: StatusCodes.Status201Created).ExecuteAsync(ctx);
+            return true;
+        }
+
+        // dtool syncs route exclusions here, while RaceTrade sends the complete site
+        // object when editing. Applying only fields present supports both clients.
         if (HttpMethods.IsPatch(ctx.Request.Method) && path.StartsWith("/sites/", StringComparison.OrdinalIgnoreCase))
         {
             var name = Uri.UnescapeDataString(path["/sites/".Length..]);
@@ -441,23 +515,14 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
                 return await JsonStatus(ctx, StatusCodes.Status404NotFound, new { error = "site not found" });
 
             using var doc = await ReadJsonBodyAsync(ctx);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("except_source_sites", out var es) && es.ValueKind == JsonValueKind.Array)
-                site.ExceptSourceSites = es.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String)
-                    .Select(e => e.GetString()!).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
-            if (root.TryGetProperty("except_target_sites", out var et) && et.ValueKind == JsonValueKind.Array)
-                site.ExceptTargetSites = et.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String)
-                    .Select(e => e.GetString()!).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
-            // cbftp field names: "ALLOW"/"BLOCK".
-            if (root.TryGetProperty("transfer_source_policy", out var sp) && sp.ValueKind == JsonValueKind.String)
-                site.TransferSourcePolicy = sp.GetString()!.Equals("BLOCK", StringComparison.OrdinalIgnoreCase)
-                    ? SiteTransferPolicy.Block : SiteTransferPolicy.Allow;
-            if (root.TryGetProperty("transfer_target_policy", out var tp) && tp.ValueKind == JsonValueKind.String)
-                site.TransferTargetPolicy = tp.GetString()!.Equals("BLOCK", StringComparison.OrdinalIgnoreCase)
-                    ? SiteTransferPolicy.Block : SiteTransferPolicy.Allow;
+            site = CbftpSiteImporter.Apply(site, doc.RootElement);
+            if (string.IsNullOrWhiteSpace(site.Name))
+                return await JsonStatus(ctx, StatusCodes.Status400BadRequest, new { error = "name is required" });
+            if (string.IsNullOrWhiteSpace(site.Host))
+                return await JsonStatus(ctx, StatusCodes.Status400BadRequest, new { error = "addresses must contain a valid host" });
 
-            var saved = engine.SaveSite(site.Name, site);
-            engine.Log("api", "compat", "info", $"PATCH {site.Name}: srcpol={saved.TransferSourcePolicy} tgtpol={saved.TransferTargetPolicy} except_source=[{string.Join(",", saved.ExceptSourceSites)}] except_target=[{string.Join(",", saved.ExceptTargetSites)}]");
+            var saved = engine.SaveSite(name, site);
+            engine.Log("api", "compat", "info", $"PATCH {name}: saved cbftp site as {saved.Name} ({saved.Host}:{saved.Port})");
             await Results.Json(new
             {
                 name = saved.Name,
@@ -646,27 +711,24 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
                 });
             }
 
-            var batchId = "compat-" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
-            var compatId = CompatNumericId(batchId);
-            var jobs = new List<Job>();
-            foreach (var targetName in targets)
+            var sitePaths = sectionPaths.ToDictionary(
+                pair => pair.Key,
+                pair => MaybeAppendRelease(pair.Value, release),
+                StringComparer.OrdinalIgnoreCase);
+            var spread = engine.StartSpread(new SpreadRequest
             {
-                var target = engine.Site(targetName);
-                if (target is null)
-                    return await JsonStatus(ctx, StatusCodes.Status404NotFound, new { error = $"target site '{targetName}' not found" });
-
-                jobs.Add(engine.StartFxp(new TransferRequest
-                {
-                    BatchId = batchId,
-                    FromSite = sourceSite,
-                    ToSite = targetName,
-                    SourcePath = MaybeAppendRelease(sectionPaths[sourceSite], release),
-                    DestPath = MaybeAppendRelease(sectionPaths[targetName], release),
-                    Label = release,
-                    Race = true,
-                    ViaApi = true,
-                }));
-            }
+                FromSite = sourceSite,
+                ToSites = targets,
+                SourcePath = sitePaths[sourceSite],
+                DestPath = sitePaths[targets[0]],
+                SitePaths = sitePaths,
+                Label = release,
+                Race = true,
+                ViaApi = true,
+            });
+            var batchId = spread.BatchId;
+            var compatId = CompatNumericId(batchId);
+            var jobs = spread.Jobs;
 
             await Results.Json(new
             {
@@ -789,6 +851,11 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
             await Results.Json(new { name, state = "RESET", status = "RESET" }).ExecuteAsync(ctx);
             return true;
         }
+    }
+    catch (Exception ex) when (ex is ArgumentException or JsonException)
+    {
+        engine.Log("api", "compat", "warn", $"{ctx.Request.Method} {path}: {ex.Message}");
+        return await JsonStatus(ctx, StatusCodes.Status400BadRequest, new { error = ex.Message });
     }
     catch (Exception ex)
     {
@@ -950,12 +1017,12 @@ static string GuessContentType(string path)
 }
 
 // ---- cbftp-compatible UDP API ------------------------------------------------------
-// Speaks the same plaintext datagram protocol as cbftp's RemoteCommandHandler:
+// Speaks the same datagram protocol as cbftp's RemoteCommandHandler:
 //   <password> race <section> <release> <site1>,<site2>|* [dlonlysites]
 //   <password> fxp <srcsite> <path-or-section> <release> <dstsite> <path-or-section> [dstrelease]
 //   <password> raw <sitelist>|* <raw command...>
 //   <password> download <site> <path-or-section> [name]
-// "distribute"/"prepare" are accepted as "race". Encrypted mode is not supported.
+// "distribute"/"prepare" are accepted as "race".
 static void StartUdpApi(WeaveEngine engine)
 {
     var s = engine.Settings(false);
@@ -974,7 +1041,7 @@ static void StartUdpApi(WeaveEngine engine)
             return;
         }
         Console.WriteLine($"WeaveFXP UDP API (cbftp-compatible) listening on 0.0.0.0:{port}");
-        engine.Log("api", "udp", "info", $"UDP API listening on port {port}");
+        engine.Log("api", "udp", "info", $"UDP API listening on port {port} ({s.UdpApiMode})");
         using (udp)
         {
             while (true)
@@ -982,7 +1049,13 @@ static void StartUdpApi(WeaveEngine engine)
                 try
                 {
                     var r = await udp.ReceiveAsync().ConfigureAwait(false);
-                    var text = Encoding.UTF8.GetString(r.Buffer).Trim();
+                    var current = engine.Settings(false);
+                    if (!SlftpUdpCodec.TryDecode(r.Buffer, current.UdpApiMode, current.ApiPassword,
+                            out var text, out var error))
+                    {
+                        engine.Log("api", "udp", "warn", $"rejected datagram from {r.RemoteEndPoint}: {error}");
+                        continue;
+                    }
                     HandleUdpApiMessage(engine, text, r.RemoteEndPoint);
                 }
                 catch (Exception ex)
@@ -1072,43 +1145,41 @@ static void UdpRace(WeaveEngine engine, string[] args)
         engine.Log("api", "udp", "warn", $"race '{release}': section '{section}' not configured on enough sites ({sites.Count})");
         return;
     }
-    // Pick the first site allowed to be a source, then every other site it may reach
-    // becomes a target — using the same cbftp policy+exception gate as the mesh.
+    // FromSite is only the initial hint. The spread engine lists every site and uses
+    // one shared scoreboard, so files can flow in either allowed direction.
     var srcName = sites.FirstOrDefault(n => !engine.Site(n)!.BlockTransferFrom);
     if (srcName is null)
     {
         engine.Log("api", "udp", "warn", $"race '{release}': every candidate source is blocked");
         return;
     }
-    var src = engine.Site(srcName)!;
-    var targets = sites.Where(n => !n.Equals(srcName, StringComparison.OrdinalIgnoreCase))
-        .Where(n => engine.TransferAllowed(src, engine.Site(n)!))
-        .ToList();
-    if (targets.Count == 0)
+    var targets = sites.Where(n => !n.Equals(srcName, StringComparison.OrdinalIgnoreCase)).ToList();
+    var hasRoute = sites.Any(source => sites.Any(target =>
+        !source.Equals(target, StringComparison.OrdinalIgnoreCase) &&
+        engine.TransferAllowed(engine.Site(source)!, engine.Site(target)!)));
+    if (!hasRoute)
     {
-        engine.Log("api", "udp", "warn", $"race '{release}': no allowed targets from {srcName} (block/except rules)");
+        engine.Log("api", "udp", "warn", $"race '{release}': no allowed routes between the selected sites (block/except rules)");
         return;
     }
-    // ONE-DIRECTIONAL: an announce means the files are on the source. Start src -> each
-    // target directly (a race per target). We deliberately do NOT use the bidirectional
-    // spread mesh here — that also builds target -> src, which has no files and just
-    // sits idle as a dead 0/1 "Running" job until it times out.
-    TryResolveRequiredSectionBasePath(src, section, out var srcBase);
-    var srcPath = MaybeAppendRelease(srcBase, release);
-    foreach (var targetName in targets)
+
+    var sitePaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var siteName in sites)
     {
-        TryResolveRequiredSectionBasePath(engine.Site(targetName)!, section, out var dstBase);
-        engine.StartFxp(new TransferRequest
-        {
-            FromSite = srcName,
-            ToSite = targetName,
-            SourcePath = srcPath,
-            DestPath = MaybeAppendRelease(dstBase, release),
-            Label = release,
-            Race = true,
-            ViaApi = true,
-        });
+        TryResolveRequiredSectionBasePath(engine.Site(siteName)!, section, out var basePath);
+        sitePaths[siteName] = MaybeAppendRelease(basePath, release);
     }
+    engine.StartSpread(new SpreadRequest
+    {
+        FromSite = srcName,
+        ToSites = targets,
+        SourcePath = sitePaths[srcName],
+        DestPath = sitePaths[targets[0]],
+        SitePaths = sitePaths,
+        Label = release,
+        Race = true,
+        ViaApi = true,
+    });
 }
 
 static void UdpFxp(WeaveEngine engine, string[] args)
@@ -1217,6 +1288,25 @@ static async Task<JsonDocument> ReadJsonBodyAsync(HttpContext ctx)
     var body = await reader.ReadToEndAsync();
     return JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
 }
+
+static string CompatListCommand(string value)
+    => value.Trim().Equals("STAT -l", StringComparison.OrdinalIgnoreCase) ||
+       value.Trim().Equals("STAT_L", StringComparison.OrdinalIgnoreCase)
+        ? "STAT_L"
+        : value.Trim().ToUpperInvariant() switch
+        {
+            "LIST" => "LIST",
+            "STAT" => "STAT",
+            "MLSD" => "MLSD",
+            _ => value.Trim(),
+        };
+
+static string CompatTlsMode(TlsMode value) => value switch
+{
+    TlsMode.Explicit => "AUTH_TLS",
+    TlsMode.Implicit => "IMPLICIT",
+    _ => "NONE",
+};
 
 static string JsonString(JsonElement root, params string[] names)
 {

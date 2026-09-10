@@ -85,6 +85,12 @@ public sealed class FtpClient : IDisposable
         public int Port;
         public string Username = "";
         public string Password = "";
+        public string Proxy = "";
+        public string ProxyUsername = "";
+        public string ProxyPassword = "";
+        public string DataProxy = "";
+        public string DataProxyUsername = "";
+        public string DataProxyPassword = "";
         public TlsMode TlsMode = TlsMode.Off;
         public bool UseEpsv;
         public bool UsePret;
@@ -169,8 +175,6 @@ public sealed class FtpClient : IDisposable
             }
         }
 
-        public bool HasBufferedData => _end > _start;
-
         public async Task<string?> ReadLineAsync()
         {
             while (true)
@@ -227,20 +231,11 @@ public sealed class FtpClient : IDisposable
         if (string.IsNullOrWhiteSpace(cfg.ListCommand)) cfg.ListCommand = "LIST";
 
         var c = new FtpClient(cfg);
-        c.Trace($"* connecting to {cfg.Host}:{cfg.Port}");
-        var tcp = new TcpClient();
-        ConfigureTcp(tcp, cfg);
-        try
-        {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(cfg.TimeoutSeconds));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
-            await tcp.ConnectAsync(cfg.Host, cfg.Port, linked.Token).ConfigureAwait(false);
-        }
-        catch
-        {
-            tcp.Dispose();
-            throw;
-        }
+        c.Trace($"* connecting to {cfg.Host}:{cfg.Port} via {TcpProxy.Describe(cfg.Proxy)}");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(cfg.TimeoutSeconds));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        var tcp = await TcpProxy.ConnectAsync(cfg.Host, cfg.Port, cfg.Proxy,
+            cfg.ProxyUsername, cfg.ProxyPassword, t => ConfigureTcp(t, cfg), linked.Token).ConfigureAwait(false);
         c._tcp = tcp;
         c._tcp.ReceiveTimeout = cfg.TimeoutSeconds * 1000;
         c._tcp.SendTimeout = cfg.TimeoutSeconds * 1000;
@@ -270,7 +265,9 @@ public sealed class FtpClient : IDisposable
 
         if (cfg.TlsMode == TlsMode.Explicit)
         {
-            var (ac, am) = await c.CommandAsync("AUTH TLS").ConfigureAwait(false);
+            var (ac, am) = await c.CommandExpectingAsync("AUTH TLS",
+                static (responseCode, _) => responseCode is 234 or 334,
+                "AUTH TLS").ConfigureAwait(false);
             if (ac != 234 && ac != 334)
             {
                 c.Dispose();
@@ -281,13 +278,11 @@ public sealed class FtpClient : IDisposable
             c._stream = ssl;
             c._reader = new LineReader(c._stream, FtpTextEncoding);
             c._dataTls = true;
-            await c.CommandAsync("PBSZ 0").ConfigureAwait(false);
-            await c.CommandAsync("PROT P").ConfigureAwait(false);
+            await c.EnablePrivateDataProtectionAsync().ConfigureAwait(false);
         }
         else if (cfg.TlsMode == TlsMode.Implicit)
         {
-            await c.CommandAsync("PBSZ 0").ConfigureAwait(false);
-            await c.CommandAsync("PROT P").ConfigureAwait(false);
+            await c.EnablePrivateDataProtectionAsync().ConfigureAwait(false);
         }
 
         await c.LoginAsync().ConfigureAwait(false);
@@ -305,15 +300,10 @@ public sealed class FtpClient : IDisposable
     {
         for (var round = 0; round < 30; round++)
         {
-            if (!_reader.HasBufferedLine)
-            {
-                // Give a same-burst line a moment to land, then peek the socket.
-                if (!_reader.HasBufferedData && _tcp.Available == 0)
-                {
-                    await Task.Delay(50).ConfigureAwait(false);
-                    if (!_reader.HasBufferedData && _tcp.Available == 0) return;
-                }
-            }
+            // Drain only complete lines already received with the first response. A
+            // fixed quiet-period wait penalises every connection; lines that arrive
+            // later are handled by CommandExpectingAsync during TLS/login instead.
+            if (!_reader.HasBufferedLine) return;
             var line = await _reader.ReadLineAsync().ConfigureAwait(false);
             if (line is null) return;
             Trace("< " + line + " [extra banner line]");
@@ -465,6 +455,49 @@ public sealed class FtpClient : IDisposable
         return (code, msg);
     }
 
+    // Broken FTP daemons sometimes emit extra standalone welcome/TLS setup replies.
+    // The command has already been sent, so do not resend it: consume only recognised
+    // stale pre-login replies until the response belonging to this command arrives.
+    private async Task<(int code, string msg)> CommandExpectingAsync(string line,
+        Func<int, string, bool> expected, string waitingFor)
+    {
+        var response = await CommandAsync(line).ConfigureAwait(false);
+        for (var skipped = 0; skipped < 8 && !expected(response.code, response.msg); skipped++)
+        {
+            if (!IsDeferredPreLoginResponse(response.code, response.msg)) return response;
+            Trace($"! deferred pre-login reply while waiting for {waitingFor}; reading next response");
+            response = await ReadResponseAsync().ConfigureAwait(false);
+            TraceResponse(response.code, response.msg);
+        }
+        return response;
+    }
+
+    private static bool IsDeferredPreLoginResponse(int code, string message)
+    {
+        if (code == 220) return true;
+        if (code != 200) return false;
+        return message.Contains("protection", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("prot p", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("pbsz", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("buffer size", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("tls", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task EnablePrivateDataProtectionAsync()
+    {
+        var (pbszCode, pbszMessage) = await CommandExpectingAsync("PBSZ 0",
+            static (responseCode, _) => responseCode / 100 == 2,
+            "PBSZ 0").ConfigureAwait(false);
+        if (pbszCode / 100 != 2)
+            throw new IOException($"PBSZ 0 failed: {pbszCode} {pbszMessage}");
+
+        var (protCode, protMessage) = await CommandExpectingAsync("PROT P",
+            static (responseCode, _) => responseCode / 100 == 2,
+            "PROT P").ConfigureAwait(false);
+        if (protCode / 100 != 2)
+            throw new IOException($"PROT P failed: {protCode} {protMessage}");
+    }
+
     private string? _currentDir;
 
     // cbftp-style transfer addressing: CWD into the directory, then STOR/RETR the BARE
@@ -480,11 +513,13 @@ public sealed class FtpClient : IDisposable
         if (code / 100 != 2) throw new IOException($"CWD {dir} failed: {code} {msg}");
     }
 
-    // Sends a command that starts a transfer (1xx/2xx expected).
+    // A transfer starts with a preliminary 1xx response (normally 125 or 150).
+    // Accepting a final 2xx here would make WaitFinalAsync consume the next command's
+    // response and desynchronise a pooled control connection.
     public async Task<(int code, string msg)> StartCommandAsync(string line)
     {
         var (code, msg) = await CommandAsync(line).ConfigureAwait(false);
-        if (code / 100 != 1 && code / 100 != 2)
+        if (code / 100 != 1)
             throw new IOException($"command failed: {code} {msg}");
         return (code, msg);
     }
@@ -502,7 +537,7 @@ public sealed class FtpClient : IDisposable
     {
         var (code, msg) = await ReadResponseAsync().ConfigureAwait(false);
         TraceResponse(code, msg);
-        if (code / 100 != 1 && code / 100 != 2)
+        if (code / 100 != 1)
             throw new IOException($"command failed: {code} {msg}");
         return (code, msg);
     }
@@ -541,7 +576,7 @@ public sealed class FtpClient : IDisposable
             TraceResponse(code, msg);
             if (code / 100 != 1)
             {
-                if (code / 100 >= 4) throw new IOException($"transfer failed: {code} {msg}");
+                if (code / 100 != 2) throw new IOException($"transfer failed: {code} {msg}");
                 return (code, msg);
             }
         }
@@ -550,7 +585,9 @@ public sealed class FtpClient : IDisposable
     private async Task LoginAsync()
     {
         var user = string.IsNullOrWhiteSpace(_cfg.Username) ? "anonymous" : _cfg.Username;
-        var (code, msg) = await CommandAsync("USER " + user).ConfigureAwait(false);
+        var (code, msg) = await CommandExpectingAsync("USER " + user,
+            static (responseCode, _) => responseCode is 230 or 331,
+            "USER").ConfigureAwait(false);
         if (code == 230) return;
         if (code != 331) throw new IOException($"USER failed: {code} {msg}");
         var pass = _cfg.Password;
@@ -727,18 +764,21 @@ public sealed class FtpClient : IDisposable
     // handshaking right after connect stalls until timeout.
     private async Task<TcpClient> OpenDataTcpAsync(FtpEndpoint ep, CancellationToken ct)
     {
-        Trace($"* opening data connection to {ep.Host}:{ep.Port}");
-        var dtcp = new TcpClient();
-        ConfigureTcp(dtcp, _cfg);
+        var inheritControlProxy = string.IsNullOrWhiteSpace(_cfg.DataProxy);
+        var proxy = inheritControlProxy ? _cfg.Proxy : _cfg.DataProxy;
+        var proxyUsername = inheritControlProxy ? _cfg.ProxyUsername : _cfg.DataProxyUsername;
+        var proxyPassword = inheritControlProxy ? _cfg.ProxyPassword : _cfg.DataProxyPassword;
+        Trace($"* opening data connection to {ep.Host}:{ep.Port} via {TcpProxy.Describe(proxy)}");
+        TcpClient dtcp;
         try
         {
             using var timeout = new CancellationTokenSource(DataTimeout);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
-            await dtcp.ConnectAsync(ep.Host, ep.Port, linked.Token).ConfigureAwait(false);
+            dtcp = await TcpProxy.ConnectAsync(ep.Host, ep.Port, proxy,
+                proxyUsername, proxyPassword, t => ConfigureTcp(t, _cfg), linked.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            dtcp.Dispose();
             Trace("! data connection failed: " + ex.Message);
             throw;
         }
@@ -785,8 +825,7 @@ public sealed class FtpClient : IDisposable
         if (isStat && _cfg.CwdBeforeStatListing)
         {
             var cwdPath = string.IsNullOrWhiteSpace(path) ? "/" : path.Trim();
-            var (cwdCode, cwdMsg) = await CommandAsync("CWD " + cwdPath).ConfigureAwait(false);
-            if (cwdCode / 100 != 2) throw new IOException($"CWD {cwdPath} failed: {cwdCode} {cwdMsg}");
+            await EnsureCwdAsync(cwdPath).ConfigureAwait(false);
         }
 
         var command = isStat && _cfg.CwdBeforeStatListing
@@ -833,11 +872,17 @@ public sealed class FtpClient : IDisposable
 
     // progress, when set, receives the cumulative byte count as the file streams.
     public async Task<long> RetrieveToAsync(string path, Stream output, CancellationToken ct = default,
-        IProgress<long>? progress = null, long maxBytes = 0)
+        IProgress<long>? progress = null, long maxBytes = 0, long restartOffset = 0)
     {
         await SetBinaryAsync().ConfigureAwait(false);
         var command = "RETR " + path;
         await MaybePretAsync(command).ConfigureAwait(false);
+        if (restartOffset > 0)
+        {
+            var (restCode, restMessage) = await CommandAsync("REST " + restartOffset).ConfigureAwait(false);
+            if (restCode != 350)
+                throw new IOException($"REST {restartOffset} failed: {restCode} {restMessage}");
+        }
         var (ep, _) = await EnterPassiveAsync("").ConfigureAwait(false);
         var dtcp = await OpenDataTcpAsync(ep, ct).ConfigureAwait(false);
         Stream? stream = null;
@@ -846,6 +891,7 @@ public sealed class FtpClient : IDisposable
             await StartCommandAsync(command).ConfigureAwait(false);
             stream = await WrapDataTlsAsync(dtcp, ct).ConfigureAwait(false);
             long total = 0;
+            if (restartOffset > 0) progress?.Report(restartOffset);
             var buffer = new byte[64 * 1024];
             while (true)
             {
@@ -865,7 +911,7 @@ public sealed class FtpClient : IDisposable
                     throw new IOException($"remote file {path} exceeds {maxBytes} bytes");
                 await output.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
                 total += read;
-                progress?.Report(total);
+                progress?.Report(restartOffset + total);
             }
             await WaitFinalAsync().ConfigureAwait(false);
             return total;

@@ -109,8 +109,16 @@
     private void OnChanged()
     {
         if (!_live) return;
-        InvokeAsync(() => { Refresh(); StateHasChanged(); });
+        if (Interlocked.Exchange(ref _refreshQueued, 1) != 0) return;
+        _ = InvokeAsync(() =>
+        {
+            Interlocked.Exchange(ref _refreshQueued, 0);
+            Refresh();
+            StateHasChanged();
+        });
     }
+
+    private int _refreshQueued;
 
     private void Refresh() => _logs = Engine.RecentLogs(_limit, _category, _level);
     private static string LevelClass(string level) => level switch { "error" => "off", "warn" => "busy", _ => "on" };

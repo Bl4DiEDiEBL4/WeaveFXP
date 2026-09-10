@@ -22,7 +22,7 @@ set "OUT=%ROOT%Release"
 set "ZIPOUT=%OUT%\zips"
 set "WORK=%TEMP%\WeaveFXP-publish-%RANDOM%-%RANDOM%"
 set "PROJ=%ROOT%WeaveFxp.Web\WeaveFxp.Web.csproj"
-set "VERSION=1.0.1"
+set "VERSION=1.0.2"
 set "LEGACY_DATA=%OUT%\data"
 set "LEGACY_DATA_SEED=%WORK%\legacy-data"
 
@@ -41,6 +41,16 @@ if errorlevel 1 (
     echo   Install the .NET 8 SDK from https://dotnet.microsoft.com/download/dotnet/8.0
     echo.
     exit /b 1
+)
+
+rem A running WeaveFXP.exe keeps the release folder locked and makes publish fail.
+rem Kill it first so republishing is one step.
+tasklist /fi "imagename eq WeaveFXP.exe" 2>nul | find /i "WeaveFXP.exe" >nul
+if not errorlevel 1 (
+    echo.
+    echo === Stopping running WeaveFXP.exe ===
+    taskkill /im WeaveFXP.exe /f >nul 2>&1
+    timeout /t 2 /nobreak >nul
 )
 
 if not exist "%OUT%" mkdir "%OUT%"
@@ -63,7 +73,7 @@ echo.
 echo === Restoring ===
 dotnet restore "%PROJ%" || goto fail
 
-for /f "usebackq delims=" %%V in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[xml]$p=Get-Content '%PROJ%'; $v=$p.Project.PropertyGroup.Version | Select-Object -First 1; if ($v) { $v } else { '1.0.1' }"`) do set "VERSION=%%V"
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[xml]$p=Get-Content '%PROJ%'; $v=$p.Project.PropertyGroup.Version | Select-Object -First 1; if ($v) { $v } else { '1.0.2' }"`) do set "VERSION=%%V"
 
 if "%~1"=="" (
     set "RIDS=win-x64 linux-x64 linux-arm64"

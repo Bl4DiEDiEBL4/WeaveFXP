@@ -4,15 +4,20 @@
 @inject WeaveEngine Engine
 @inject IJSRuntime Js
 
+@code {
+    [SupplyParameterFromQuery(Name = "favorite")]
+    public string? FavoriteQuery { get; set; }
+}
+
 <h1 class="visually-hidden">Browser</h1>
 
 <div class="browser-page" style="@BrowserStyle" @ref="_browserRoot">
-    <nav class="browser-tabs" aria-label="Browser tabs">
+    <nav class="browser-tabs" aria-label="Browser windows">
         @foreach (var tab in _browserTabs)
         {
             <div class="@BrowserTabClass(tab)">
                 <button class="browser-tab-main" title="@TabTitle(tab)" @onclick="() => ActivateBrowserTab(tab.Id)">
-                    <span class="browser-tab-title">@tab.Title</span>
+                    <span class="browser-tab-title">@BrowserTabLabel(tab)</span>
                     <span class="browser-tab-sub">@TabMeta(tab)</span>
                 </button>
                 @if (_browserTabs.Count > 1)
@@ -21,16 +26,51 @@
                 }
             </div>
         }
-        <button class="browser-tab-add" title="New browser tab" @onclick="AddManualBrowserTab">
+        <button class="browser-tab-add" title="New window" @onclick="AddManualBrowserTab">
             <span class="btn-icon">＋</span>
-            New browse
+            New Window
+        </button>
+        <button class="browser-tab-add browser-favorites-toggle" title="Open a favorite window" @onclick="ToggleFavorites">
+            <span class="btn-icon">★</span>
+            Favorites
         </button>
     </nav>
+
+    @if (_favoritesOpen)
+    {
+        <div class="context-backdrop" @onclick="CloseFavorites"></div>
+        <div class="browser-favorites-menu">
+            <div class="context-title">Favorite windows</div>
+            @if (_favorites.Count == 0)
+            {
+                <div class="favorites-empty">No favorites saved.</div>
+            }
+            else
+            {
+                @foreach (var favorite in _favorites)
+                {
+                    <div class="favorite-row">
+                        <button class="favorite-open" title="Open @favorite.Name" @onclick="() => OpenFavorite(favorite)">
+                            <span class="favorite-star">★</span>
+                            <span>@favorite.Name</span>
+                            <small>@favorite.Site</small>
+                        </button>
+                        <button class="favorite-remove" title="Remove @favorite.Name" @onclick="() => RemoveFavorite(favorite)">×</button>
+                    </div>
+                }
+            }
+            <div class="context-sep"></div>
+            <button class="favorite-save-current" disabled="@(!CanSaveFavorite())" @onclick="OpenSaveFavorite">
+                <span class="btn-icon">＋</span>
+                Save current window
+            </button>
+        </div>
+    }
 
     <div class="browsers">
         <PaneView Pane="Active.Left" Sites="_sites" LocalRoots="@LocalRoots()"
                   OnLocal='() => ToggleLocalPane(Active.Left)'
-                  OnSiteSelected="s => ConnectPane(Active.Left, s)"
+                  OnSiteSelected="s => SelectPaneSite(Active.Left, s)"
                   OnSectionSelected="s => JumpSection(Active.Left, s)"
                   OnPathChanged="p => SetPanePath(Active.Left, p)"
                   OnConnect="() => ListPane(Active.Left)"
@@ -58,7 +98,7 @@
 
         <PaneView Pane="Active.Right" Sites="_sites" LocalRoots="@LocalRoots()"
                   OnLocal='() => ToggleLocalPane(Active.Right)'
-                  OnSiteSelected="s => ConnectPane(Active.Right, s)"
+                  OnSiteSelected="s => SelectPaneSite(Active.Right, s)"
                   OnSectionSelected="s => JumpSection(Active.Right, s)"
                   OnPathChanged="p => SetPanePath(Active.Right, p)"
                   OnConnect="() => ListPane(Active.Right)"
@@ -87,12 +127,21 @@
                     {
                         @foreach (var job in ManualJobs().Take(60))
                         {
-                            <details class="job-row">
+                            <details class="job-row" @key="job.Id">
                                 <summary @oncontextmenu="e => ShowJobContext(job, e)" @oncontextmenu:preventDefault="true">
                                     <span class="badge @StateClass(job.State)">@job.State.ToString().ToLowerInvariant()</span>
+                                    @if (job.State == JobState.Queued)
+                                    {
+                                        <span class="queue-move" @onclick:stopPropagation="true" @onclick:preventDefault="true">
+                                            <button class="secondary icon-btn" title="Move up" aria-label="Move job up"
+                                                    disabled="@(!Engine.CanMoveManualJob(job.Id, -1))" @onclick="() => MoveQueueJob(job.Id, -1)">&#8593;</button>
+                                            <button class="secondary icon-btn" title="Move down" aria-label="Move job down"
+                                                    disabled="@(!Engine.CanMoveManualJob(job.Id, 1))" @onclick="() => MoveQueueJob(job.Id, 1)">&#8595;</button>
+                                        </span>
+                                    }
                                     <span class="job-route job-open" title="Double-click to open in browser"
                                           @ondblclick="() => OpenJobTab(job)"
-                                          @ondblclick:stopPropagation="true" @ondblclick:preventDefault="true">@job.Request.FromSite → @job.Request.ToSite</span>
+                                          @ondblclick:stopPropagation="true" @ondblclick:preventDefault="true">@DisplayRoute(job)</span>
                                     <span class="job-path job-open"
                                           @ondblclick="() => OpenJobTab(job)"
                                           @ondblclick:stopPropagation="true" @ondblclick:preventDefault="true">@job.Request.SourcePath → @job.Request.DestPath</span>
@@ -163,15 +212,49 @@
             }
         </div>
         <nav class="bottom-tabs">
-            <button class="btab @(_tab == "queue" ? "active" : "")" @onclick='() => _tab = "queue"'><span class="tab-icon">▦</span> Queue @(ActiveJobs() > 0 ? $"({ActiveJobs()})" : "")</button>
             <button class="btab @(_tab == "ftp" ? "active" : "")" @onclick='() => _tab = "ftp"'><span class="tab-icon">⌁</span> FTP Log</button>
+            <button class="btab @(_tab == "queue" ? "active" : "")" @onclick='() => _tab = "queue"'><span class="tab-icon">▦</span> Queue @(ActiveJobs() > 0 ? $"({ActiveJobs()})" : "")</button>
             <button class="btab @(_tab == "transfer" ? "active" : "")" @onclick='() => _tab = "transfer"'><span class="tab-icon">⇄</span> Transfer Log</button>
             <button class="btab @(_tab == "system" ? "active" : "")" @onclick='() => _tab = "system"'><span class="tab-icon">◎</span> System Log</button>
             <span class="spacer"></span>
-            <label class="resize-label">Log height <input class="bottom-range" type="range" min="18" max="52" @bind="Active.BottomVh" @bind:event="oninput" /></label>
+            @if (_tab == "queue")
+            {
+                <button class="secondary slim" disabled="@(ManualJobs().Count == 0)" @onclick="OpenRemoveAllConfirm">Remove all</button>
+            }
+            <label class="chk log-autoscroll">
+                <input type="checkbox" checked="@_autoScrollLogs" @onchange="SetAutoScroll" />
+                Auto-scroll
+            </label>
+            <button class="secondary slim log-clear" title="Clear all FTP, transfer and system logs" @onclick="OpenClearLogsConfirm">
+                <span class="btn-icon">≡</span>
+                Clear
+            </button>
+            <label class="resize-label">Log height <input class="bottom-range" type="range" min="18" max="52"
+                    @bind="Active.BottomVh" @bind:event="oninput" @bind:after="PersistBrowserState" /></label>
         </nav>
     </section>
 </div>
+
+@if (_saveFavoriteOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseSaveFavorite"></div>
+    <section class="modal favorite-modal" role="dialog" aria-modal="true" aria-labelledby="favorite-title">
+        <header>
+            <div>
+                <h3 id="favorite-title">Save Favorite Window</h3>
+                <div class="viewer-meta">The menu shows only the favorite name and site.</div>
+            </div>
+            <button class="secondary icon-btn" title="Close" @onclick="CloseSaveFavorite">×</button>
+        </header>
+        <div class="form-grid">
+            <label class="wide">Name<input @bind="_favoriteName" placeholder="TV" @onkeydown="FavoriteNameKeyDown" /></label>
+        </div>
+        <div class="modal-actions">
+            <button class="primary" disabled="@(string.IsNullOrWhiteSpace(_favoriteName))" @onclick="SaveFavorite">Save favorite</button>
+            <button class="secondary" @onclick="CloseSaveFavorite">Cancel</button>
+        </div>
+    </section>
+}
 
 @if (_contextOpen)
 {
@@ -180,6 +263,8 @@
         <div class="context-title">@ContextTitle()</div>
         @if (_contextKind == ContextKind.Queue)
         {
+            <button @onclick="() => MoveQueueJob(_contextJobId, -1)" disabled="@(!Engine.CanMoveManualJob(_contextJobId, -1))">Move up</button>
+            <button @onclick="() => MoveQueueJob(_contextJobId, 1)" disabled="@(!Engine.CanMoveManualJob(_contextJobId, 1))">Move down</button>
             <button @onclick="RestartContextJob" disabled="@(!CanRestartContextJob())">Restart</button>
             <button @onclick="RetryContextJob" disabled="@(!CanRetryContextJob())">Retry</button>
             @if (ContextJob?.Paused == true)
@@ -192,6 +277,7 @@
             }
             <button @onclick="CancelContextJob" disabled="@(!CanCancelContextJob())">Stop</button>
             <button @onclick="RemoveContextJob">Remove</button>
+            <button @onclick="OpenRemoveAllConfirm">Remove all</button>
             <button @onclick="OpenCommandShellForQueue">Command Shell</button>
         }
         else
@@ -250,6 +336,48 @@
             <button @onclick="RefreshContextPane">Refresh</button>
         }
     </div>
+}
+
+@if (_removeAllConfirmOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseRemoveAllConfirm"></div>
+    <section class="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="remove-all-title">
+        <header>
+            <h3 id="remove-all-title">Remove all manual jobs?</h3>
+            <button class="secondary icon-btn" title="Close" @onclick="CloseRemoveAllConfirm">&#215;</button>
+        </header>
+        <div class="confirm-body">
+            <p>Remove @_removeAllIds.Count job(s) from the queue, including completed jobs. Queued and running transfers will be stopped.</p>
+            <p>Races and transferred files will not be removed.</p>
+        </div>
+        <div class="modal-actions">
+            <button class="secondary" @onclick="CloseRemoveAllConfirm">Cancel</button>
+            <button class="danger" @onclick="RemoveAllQueueJobs">Remove all</button>
+        </div>
+    </section>
+}
+
+@if (_clearLogsConfirmOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseClearLogsConfirm"></div>
+    <section class="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="clear-logs-title">
+        <header>
+            <h3 id="clear-logs-title">Clear all logs?</h3>
+            <button class="secondary icon-btn" title="Close" @onclick="CloseClearLogsConfirm">×</button>
+        </header>
+        <div class="confirm-body">
+            <p>This permanently deletes all FTP, Transfer and System log entries from:</p>
+            <ul>
+                <li>the running application's memory</li>
+                <li>the SQLite log history on disk</li>
+            </ul>
+            <p>These entries will not return after a restart. New log entries will continue to be recorded.</p>
+        </div>
+        <div class="modal-actions">
+            <button class="secondary" @onclick="CloseClearLogsConfirm">Cancel</button>
+            <button class="danger" @onclick="ClearBrowserLogs">Clear all logs</button>
+        </div>
+    </section>
 }
 
 @if (_shellOpen)
@@ -313,17 +441,26 @@
 }
 
 @code {
-    private readonly List<BrowserTab> _browserTabs = new() { new BrowserTab("main", "Main") };
+    private readonly List<BrowserTab> _browserTabs = new() { new BrowserTab("main", "Window 1") };
     private readonly Dictionary<string, string> _raceJobTabs = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _dismissedRaceJobs = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _terminalJobsSeen = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime _lastLiveDownloadBrowseRefreshUtc = DateTime.MinValue;
     private ElementReference _browserRoot;
     private DotNetObjectReference<Browser>? _selfRef;
     private List<Site> _sites = new();
+    private List<BrowserFavorite> _favorites = new();
     private List<Job> _jobs = new();
     private readonly List<LogEntry> _logs = new();
     private long _logSeq;
-    private string _tab = "queue";
+    private string _tab = "ftp";
+    private bool _autoScrollLogs = true;
+    private bool _clearLogsConfirmOpen;
+    private bool _favoritesOpen;
+    private bool _saveFavoriteOpen;
+    private string _favoriteName = "";
+    private string? _favoriteToOpen;
+    private string? _lastFavoriteQuery;
     private string? _toast;
     private string _activeBrowserTabId = "main";
     private int _browserTabSeq = 1;
@@ -363,11 +500,21 @@
     protected override void OnInitialized()
     {
         _sites = Engine.Sites(true);
+        _favorites = Engine.Settings(true).BrowserFavorites;
         _jobs = Engine.Jobs();
         foreach (var job in _jobs.Where(j => j.Terminal))
             _terminalJobsSeen.Add(job.Id);
         Engine.Changed += OnEngineChanged;
         PullLogs();
+    }
+
+    protected override void OnParametersSet()
+    {
+        var requested = FavoriteQuery?.Trim();
+        if (string.IsNullOrWhiteSpace(requested) ||
+            requested.Equals(_lastFavoriteQuery, StringComparison.OrdinalIgnoreCase)) return;
+        _lastFavoriteQuery = requested;
+        _favoriteToOpen = requested;
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -377,14 +524,24 @@
             _browserStorageReady = true;
             await RestoreBrowserStateAsync();
         }
-        // Auto-scroll the log panes (FTP/Transfer/System log + job event lists) to the
-        // newest line — unless the user has scrolled up more than ~160px to read back.
-        try
+        if (_favoriteToOpen is not null)
         {
-            await Js.InvokeVoidAsync("eval",
-                "document.querySelectorAll('.logview,.events').forEach(function(e){if(e.scrollHeight-e.scrollTop-e.clientHeight<160)e.scrollTop=e.scrollHeight;})");
+            var requested = _favoriteToOpen;
+            _favoriteToOpen = null;
+            _favorites = Engine.Settings(true).BrowserFavorites;
+            var favorite = _favorites.FirstOrDefault(f => f.Name.Equals(requested, StringComparison.OrdinalIgnoreCase));
+            if (favorite is null) Toast($"Favorite {requested} no longer exists");
+            else await OpenFavorite(favorite);
+            await InvokeAsync(StateHasChanged);
         }
-        catch { /* circuit closing */ }
+        if (_autoScrollLogs)
+        {
+            try
+            {
+                await Js.InvokeVoidAsync("weaveFxp.scrollLogsToBottom", _browserRoot);
+            }
+            catch { /* circuit closing */ }
+        }
     }
 
     public void Dispose()
@@ -395,16 +552,167 @@
 
     private void OnEngineChanged()
     {
-        var jobs = Engine.Jobs();
+        if (Interlocked.Exchange(ref _engineRefreshQueued, 1) != 0) return;
         _ = InvokeAsync(async () =>
         {
+            Interlocked.Exchange(ref _engineRefreshQueued, 0);
+            var jobs = Engine.Jobs();
             _jobs = jobs;
             var terminal = _jobs.Where(j => j.Terminal && _terminalJobsSeen.Add(j.Id)).ToList();
+            var runningDownloads = _jobs
+                .Where(j => j.Type == JobType.Download && j.State == JobState.Running)
+                .ToList();
             PullLogs();
+            var now = DateTime.UtcNow;
+            if (runningDownloads.Count > 0 &&
+                now - _lastLiveDownloadBrowseRefreshUtc >= TimeSpan.FromSeconds(1))
+            {
+                _lastLiveDownloadBrowseRefreshUtc = now;
+                await RefreshLocalDownloadBrowsesAsync(runningDownloads);
+            }
             if (terminal.Count > 0)
                 await RefreshBrowsesForJobsAsync(terminal);
             StateHasChanged();
         });
+    }
+
+    private int _engineRefreshQueued;
+
+    // ---- favorite windows -----------------------------------------------------------
+
+    private void ToggleFavorites() => _favoritesOpen = !_favoritesOpen;
+    private void CloseFavorites() => _favoritesOpen = false;
+
+    private bool TryFavoritePanes(out PaneModel remote, out PaneModel local)
+    {
+        if (IsLocalPane(Active.Left) && !string.IsNullOrWhiteSpace(Active.Left.Path) &&
+            !IsLocalPane(Active.Right) && !string.IsNullOrWhiteSpace(Active.Right.Site))
+        {
+            remote = Active.Right;
+            local = Active.Left;
+            return true;
+        }
+        if (IsLocalPane(Active.Right) && !string.IsNullOrWhiteSpace(Active.Right.Path) &&
+            !IsLocalPane(Active.Left) && !string.IsNullOrWhiteSpace(Active.Left.Site))
+        {
+            remote = Active.Left;
+            local = Active.Right;
+            return true;
+        }
+        remote = Active.Left;
+        local = Active.Right;
+        return false;
+    }
+
+    private bool CanSaveFavorite() => TryFavoritePanes(out _, out _);
+
+    private void OpenSaveFavorite()
+    {
+        if (!TryFavoritePanes(out var remote, out _))
+        {
+            Toast("Connect one site pane and one local pane first");
+            return;
+        }
+        _favoritesOpen = false;
+        _favoriteName = remote.Path.TrimEnd('/').Split('/').LastOrDefault() ?? "";
+        if (_favoriteName.Length == 0) _favoriteName = remote.Site;
+        _saveFavoriteOpen = true;
+    }
+
+    private void CloseSaveFavorite()
+    {
+        _saveFavoriteOpen = false;
+        _favoriteName = "";
+    }
+
+    private void FavoriteNameKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") SaveFavorite();
+        else if (e.Key == "Escape") CloseSaveFavorite();
+    }
+
+    private void SaveFavorite()
+    {
+        if (!TryFavoritePanes(out var remote, out var local)) return;
+        var name = _favoriteName.Trim();
+        if (name.Length == 0) return;
+
+        _favorites.RemoveAll(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        _favorites.Add(new BrowserFavorite
+        {
+            Name = name,
+            Site = remote.Site,
+            RemotePath = NormalizeRemotePath(remote.Path),
+            LocalPath = Path.GetFullPath(local.Path),
+            LocalSide = ReferenceEquals(local, Active.Left) ? "left" : "right",
+        });
+        PersistFavorites();
+        CloseSaveFavorite();
+        Toast($"Saved favorite {name}");
+    }
+
+    private void RemoveFavorite(BrowserFavorite favorite)
+    {
+        _favorites.RemoveAll(f => f.Name.Equals(favorite.Name, StringComparison.OrdinalIgnoreCase));
+        PersistFavorites();
+    }
+
+    private void PersistFavorites()
+    {
+        var settings = Engine.Settings(true);
+        settings.BrowserFavorites = _favorites.Select(f => new BrowserFavorite
+        {
+            Name = f.Name,
+            Site = f.Site,
+            RemotePath = f.RemotePath,
+            LocalPath = f.LocalPath,
+            LocalSide = AppSettings.NormalizeFavoriteLocalSide(f.LocalSide),
+        }).ToList();
+        Engine.UpdateSettings(settings);
+        _favorites = Engine.Settings(true).BrowserFavorites;
+    }
+
+    private async Task OpenFavorite(BrowserFavorite favorite)
+    {
+        _favoritesOpen = false;
+        if (!_sites.Any(s => s.Name.Equals(favorite.Site, StringComparison.OrdinalIgnoreCase)))
+        {
+            Toast($"Site {favorite.Site} no longer exists");
+            return;
+        }
+
+        try { Directory.CreateDirectory(favorite.LocalPath); }
+        catch (Exception ex) { Toast($"Local folder: {ex.Message}"); return; }
+
+        var side = AppSettings.NormalizeFavoriteLocalSide(favorite.LocalSide);
+        var localOnLeft = side switch
+        {
+            "left" => true,
+            "right" => false,
+            _ => IsLocalPane(Active.Left) && !IsLocalPane(Active.Right),
+        };
+        var localPane = localOnLeft ? Active.Left : Active.Right;
+        var remotePane = localOnLeft ? Active.Right : Active.Left;
+
+        PrepareFavoritePane(remotePane, favorite.Site, NormalizeRemotePath(favorite.RemotePath));
+        PrepareFavoritePane(localPane, "local", Path.GetFullPath(favorite.LocalPath));
+        Active.Title = favorite.Name;
+        await Task.WhenAll(ListPane(remotePane), ListPane(localPane));
+        PersistBrowserState();
+    }
+
+    private static void PrepareFavoritePane(PaneModel pane, string site, string path)
+    {
+        pane.Site = site;
+        if (!site.Equals("local", StringComparison.OrdinalIgnoreCase)) pane.LastSite = site;
+        pane.Path = path;
+        pane.Entries.Clear();
+        pane.Selected.Clear();
+        ClearCompare(pane);
+        pane.Loaded = false;
+        pane.Loading = false;
+        pane.Error = null;
+        pane.Status = "Opening favorite...";
     }
 
     private void PullLogs()
@@ -420,7 +728,14 @@
 
     // The browser queue is for MANUAL work only (FXP + downloads), like a real FTP
     // client. Races have their own page.
-    private List<Job> ManualJobs() => _jobs.Where(j => j.Type != JobType.Race).ToList();
+    private List<Job> ManualJobs()
+    {
+        var positions = Engine.ManualQueuePositions();
+        return _jobs.Where(j => j.Type != JobType.Race)
+            .OrderBy(j => j.State == JobState.Running ? 0 : j.State == JobState.Queued ? 1 : 2)
+            .ThenBy(j => positions.GetValueOrDefault(j.Id, -1))
+            .ThenByDescending(j => j.CreatedAt).ToList();
+    }
     private int ActiveJobs() => _jobs.Count(j => j.Type != JobType.Race && j.State is JobState.Queued or JobState.Running);
     private static string LogCategoryFor(string tab) => tab switch { "ftp" => "ftp", "transfer" => "transfer", _ => "system" };
 
@@ -466,7 +781,7 @@
 
     private void AddManualBrowserTab()
     {
-        var tab = AddBrowserTab($"Browse {_browserTabSeq + 1}", null, true);
+        var tab = AddBrowserTab($"Window {_browserTabSeq + 1}", null, true);
         Toast($"Opened {tab.Title}");
         PersistBrowserState();
     }
@@ -549,7 +864,9 @@
         tab.Left.Site = job.Request.FromSite;
         tab.Left.Path = ParentPath(job.Request.SourcePath);
         tab.Left.Status = job.Request.SourcePath;
-        tab.Right.Site = job.Request.ToSite;
+        tab.Right.Site = job.Request.MeshSites.Count > 1
+            ? job.Request.MeshSites.FirstOrDefault(s => !s.Equals(job.Request.FromSite, StringComparison.OrdinalIgnoreCase)) ?? ""
+            : job.Request.ToSite;
         tab.Right.Path = ParentPath(job.Request.DestPath);
         tab.Right.Status = job.Request.DestPath;
     }
@@ -565,19 +882,41 @@
     private string TabTitle(BrowserTab tab)
     {
         var job = JobForTab(tab);
-        return job is null ? tab.Title : $"{job.Type}: {job.Request.FromSite} -> {job.Request.ToSite}";
+        return job is null ? BrowserTabLabel(tab) : $"{job.Type}: {DisplayRoute(job)}";
+    }
+
+    private string BrowserTabLabel(BrowserTab tab)
+    {
+        if (JobForTab(tab) is not null) return tab.Title;
+
+        var connectedSites = new[] { tab.Left, tab.Right }
+            .Where(p => p.Loaded && p.Error is null && !string.IsNullOrWhiteSpace(p.Site))
+            .Select(p => IsLocalPane(p) ? "Local" : p.Site)
+            .ToList();
+        return connectedSites.Count == 0 ? tab.Title : string.Join(" - ", connectedSites);
     }
 
     private string TabMeta(BrowserTab tab)
     {
         var job = JobForTab(tab);
-        if (job is not null) return $"{job.State} · {job.Request.FromSite} → {job.Request.ToSite}";
-        var connected = (string.IsNullOrWhiteSpace(tab.Left.Site) ? 0 : 1) + (string.IsNullOrWhiteSpace(tab.Right.Site) ? 0 : 1);
-        return connected == 0 ? "empty browse" : $"{connected}/2 browses selected";
+        if (job is not null) return $"{job.State} · {DisplayRoute(job)}";
+        var panes = new[] { tab.Left, tab.Right }
+            .Where(p => p.Loaded && p.Error is null)
+            .ToList();
+        var serverCount = panes.Count(p => !IsLocalPane(p));
+        var hasLocal = panes.Any(IsLocalPane);
+        if (serverCount == 0 && !hasLocal) return "empty window";
+        if (serverCount > 0 && hasLocal) return $"{serverCount} server + local";
+        if (serverCount > 0) return $"{serverCount} server pane(s)";
+        return "local pane(s)";
     }
 
     private Job? JobForTab(BrowserTab tab) =>
         string.IsNullOrWhiteSpace(tab.JobId) ? null : _jobs.FirstOrDefault(j => j.Id == tab.JobId);
+
+    private static string DisplayRoute(Job job) => job.Request.MeshSites.Count > 1
+        ? "Mesh"
+        : $"{job.Request.FromSite} → {job.Request.ToSite}";
 
     private async Task StartSplitDrag(PointerEventArgs e)
     {
@@ -620,6 +959,7 @@
             if (state is null || state.Tabs.Count == 0) return;
 
             _restoringBrowserState = true;
+            _autoScrollLogs = state.AutoScrollLogs ?? true;
             _browserTabs.Clear();
             _raceJobTabs.Clear();
             _dismissedRaceJobs.Clear();
@@ -628,7 +968,9 @@
             foreach (var saved in state.Tabs.Take(12))
             {
                 var id = string.IsNullOrWhiteSpace(saved.Id) ? $"browse-{_browserTabs.Count + 1}" : saved.Id;
-                var title = string.IsNullOrWhiteSpace(saved.Title) ? "Browse" : saved.Title;
+                var title = string.IsNullOrWhiteSpace(saved.JobId)
+                    ? ManualWindowTitle(saved.Title, _browserTabs.Count + 1)
+                    : string.IsNullOrWhiteSpace(saved.Title) ? "Race" : saved.Title;
                 var tab = new BrowserTab(id, title)
                 {
                     JobId = saved.JobId,
@@ -643,7 +985,7 @@
             }
 
             if (_browserTabs.Count == 0)
-                _browserTabs.Add(new BrowserTab("main", "Main"));
+                _browserTabs.Add(new BrowserTab("main", "Window 1"));
 
             _activeBrowserTabId = _browserTabs.Any(t => t.Id == state.ActiveTabId)
                 ? state.ActiveTabId
@@ -660,6 +1002,16 @@
             _restoringBrowserState = false;
         }
         await InvokeAsync(StateHasChanged);
+    }
+
+    private static string ManualWindowTitle(string? title, int index)
+    {
+        if (string.IsNullOrWhiteSpace(title) ||
+            title.Equals("Main", StringComparison.OrdinalIgnoreCase) ||
+            title.Equals("Browse", StringComparison.OrdinalIgnoreCase) ||
+            title.StartsWith("Browse ", StringComparison.OrdinalIgnoreCase))
+            return $"Window {index}";
+        return title;
     }
 
     private async Task RestoreLoadedBrowsesAsync()
@@ -696,6 +1048,7 @@
         var state = new BrowserStateSnapshot
         {
             ActiveTabId = _activeBrowserTabId,
+            AutoScrollLogs = _autoScrollLogs,
             DismissedRaceJobs = _dismissedRaceJobs.ToList(),
             Tabs = _browserTabs.Select(t => new BrowserTabSnapshot
             {
@@ -711,6 +1064,25 @@
         var json = System.Text.Json.JsonSerializer.Serialize(state, BrowserStateJson);
         await Js.InvokeVoidAsync("localStorage.setItem", BrowserStateKey, json);
     }
+
+    private void SetAutoScroll(ChangeEventArgs e)
+    {
+        _autoScrollLogs = e.Value is bool enabled && enabled;
+        PersistBrowserState();
+    }
+
+    private void ClearBrowserLogs()
+    {
+        _clearLogsConfirmOpen = false;
+        var count = Engine.ClearLogs();
+        _logs.Clear();
+        _logSeq = 0;
+        PullLogs();
+        Toast($"Cleared {count} log row(s)");
+    }
+
+    private void OpenClearLogsConfirm() => _clearLogsConfirmOpen = true;
+    private void CloseClearLogsConfirm() => _clearLogsConfirmOpen = false;
 
     private static PaneSnapshot SnapshotPane(PaneModel pane) => new()
     {
@@ -761,6 +1133,51 @@
 
         if (refresh.Count > 0)
             Toast($"Refreshed {refresh.Count} browse(s) after transfer");
+    }
+
+    private async Task RefreshLocalDownloadBrowsesAsync(IReadOnlyList<Job> jobs)
+    {
+        var refresh = new HashSet<PaneModel>();
+        foreach (var job in jobs)
+        {
+            foreach (var pane in AllPanes())
+            {
+                if (IsLocalPane(pane) && ShouldRefreshPaneForJob(pane, job))
+                    refresh.Add(pane);
+            }
+        }
+
+        foreach (var pane in refresh)
+        {
+            if (pane.Loading) continue;
+            pane.Loading = true;
+            try
+            {
+                var selectedPaths = pane.Selected
+                    .Where(index => index >= 0 && index < pane.Entries.Count)
+                    .Select(index => pane.Entries[index].Path)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var entries = await Task.Run(() => ListLocal(pane.Path));
+                pane.Entries = entries;
+                ApplySort(pane);
+                pane.Selected = pane.Entries
+                    .Select((entry, index) => (entry, index))
+                    .Where(item => selectedPaths.Contains(item.entry.Path))
+                    .Select(item => item.index)
+                    .ToHashSet();
+                pane.Loaded = true;
+                pane.Error = null;
+                UpdatePaneStatus(pane);
+            }
+            catch
+            {
+                // A transient local listing failure should not interrupt the download.
+            }
+            finally
+            {
+                pane.Loading = false;
+            }
+        }
     }
 
     private static bool ShouldRefreshPaneForJob(PaneModel pane, Job job)
@@ -897,16 +1314,36 @@
     private Task ToggleLocalPane(PaneModel pane)
     {
         if (IsLocalPane(pane))
-        {
-            var site = !string.IsNullOrWhiteSpace(pane.LastSite) && _sites.Any(s => s.Name.Equals(pane.LastSite, StringComparison.OrdinalIgnoreCase))
-                ? pane.LastSite
-                : _sites.FirstOrDefault()?.Name ?? "";
-            return ConnectPane(pane, site);
-        }
+            return SelectPaneSite(pane, "");
 
         if (!string.IsNullOrWhiteSpace(pane.Site))
+        {
+            CancelLocalTransfersForDisconnectedSite(pane.Site);
             pane.LastSite = pane.Site;
+        }
         return ConnectPane(pane, "local");
+    }
+
+    private Task SelectPaneSite(PaneModel pane, string site)
+    {
+        site = site?.Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(site))
+            CancelLocalTransfersForDisconnectedSite(pane.Site);
+        if (!string.IsNullOrWhiteSpace(site))
+            pane.LastSite = site;
+
+        pane.Site = site;
+        var selectedSite = _sites.FirstOrDefault(x => x.Name.Equals(site, StringComparison.OrdinalIgnoreCase));
+        pane.Path = string.IsNullOrEmpty(selectedSite?.BasePath) ? "/" : selectedSite.BasePath;
+        pane.Entries.Clear();
+        pane.Selected.Clear();
+        ClearCompare(pane);
+        pane.Loaded = false;
+        pane.Loading = false;
+        pane.Error = null;
+        pane.Status = string.IsNullOrWhiteSpace(site) ? "Disconnected" : $"Ready to connect to {site}";
+        PersistBrowserState();
+        return Task.CompletedTask;
     }
 
     private async Task ConnectPane(PaneModel pane, string site)
@@ -932,6 +1369,7 @@
 
     private void DisconnectPane(PaneModel pane)
     {
+        CancelLocalTransfersForDisconnectedSite(pane.Site);
         pane.Site = "";
         pane.Path = "/";
         pane.Entries.Clear();
@@ -942,6 +1380,14 @@
         pane.Error = null;
         pane.Status = "Disconnected";
         PersistBrowserState();
+    }
+
+    private void CancelLocalTransfersForDisconnectedSite(string site)
+    {
+        if (string.IsNullOrWhiteSpace(site) || site.Equals("local", StringComparison.OrdinalIgnoreCase)) return;
+        var cancelled = Engine.CancelLocalTransfersForSite(site, "Disconnected from browser pane");
+        if (cancelled > 0)
+            Toast($"Cancelled {cancelled} local transfer(s) for {site}");
     }
 
     private async Task JumpSection(PaneModel pane, string section)
@@ -1455,11 +1901,39 @@
 
     private void RemoveContextJob()
     {
-        var job = ContextJob;
-        if (job is null) { HideContext(); return; }
-        if (!Engine.RemoveJob(job.Id))
-            Toast($"Cannot remove {job.Id}");
+        var id = _contextJobId.Trim();
+        if (id.Length == 0) { HideContext(); return; }
+        if (!Engine.RemoveJob(id))
+            Toast($"Cannot remove {id}");
+        else
+            _jobs.RemoveAll(j => j.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
         HideContext();
+    }
+
+    private void MoveQueueJob(string id, int direction)
+    {
+        if (!Engine.MoveManualJob(id, direction)) Toast("Job is no longer movable in the queue");
+        HideContext();
+    }
+
+    private bool _removeAllConfirmOpen;
+    private List<string> _removeAllIds = new();
+
+    private void OpenRemoveAllConfirm()
+    {
+        _removeAllIds = ManualJobs().Select(job => job.Id).ToList();
+        HideContext();
+        _removeAllConfirmOpen = _removeAllIds.Count > 0;
+    }
+
+    private void CloseRemoveAllConfirm() => _removeAllConfirmOpen = false;
+
+    private void RemoveAllQueueJobs()
+    {
+        var removed = Engine.RemoveManualJobs(_removeAllIds);
+        _jobs = Engine.Jobs();
+        CloseRemoveAllConfirm();
+        Toast($"Removed {removed} manual job(s)");
     }
 
     private void RestartContextJob()
@@ -1791,6 +2265,7 @@
     private sealed class BrowserStateSnapshot
     {
         public string ActiveTabId { get; set; } = "main";
+        public bool? AutoScrollLogs { get; set; }
         public List<string> DismissedRaceJobs { get; set; } = new();
         public List<BrowserTabSnapshot> Tabs { get; set; } = new();
     }

@@ -1,0 +1,201 @@
+@page "/search"
+@implements IAsyncDisposable
+@inject WeaveEngine Engine
+@inject IJSRuntime Js
+@inject NavigationManager Navigation
+
+<div class="page site-search-page">
+    <header class="page-head">
+        <h2>Site Search</h2>
+        <div class="page-actions">
+            <button disabled="@(_siteNames.Count == 0 || Running || (!_recursive && string.IsNullOrWhiteSpace(_include)))" @onclick="Start">Search</button>
+            <button class="secondary" disabled="@(!Running)" @onclick="Stop">Stop</button>
+        </div>
+    </header>
+    <section class="search-filters">
+        <fieldset class="search-sites">
+            <legend>Sites</legend>
+            @foreach (var site in _sites)
+            {
+                <label class="chk"><input type="checkbox" checked="@_siteNames.Contains(site.Name)" disabled="@Running"
+                    @onchange="e => SelectSite(site.Name, e.Value is true)" /> @site.Name</label>
+            }
+        </fieldset>
+        <div class="search-filter-fields">
+            <label class="chk search-wide"><input type="checkbox" @bind="_recursive" disabled="@Running" /> Recursive folder scan</label>
+            <label class="search-wide">Search in<textarea rows="2" @bind="_paths" placeholder="/SECTION" disabled="@Running"></textarea></label>
+            <label>@(_recursive ? "Search for" : "SITE SEARCH")<input @bind="_include" @bind:event="oninput" placeholder="@(_recursive ? "*.sfv;*.nfo" : "Release name")" disabled="@Running" /></label>
+            <label>Exclude<input @bind="_exclude" disabled="@Running" /></label>
+            <label>Result limit<input type="number" min="1" max="10000" @bind="_maxResults" disabled="@Running" /></label>
+            @if (_recursive)
+            {
+            <label>Match<select @bind="_mode" disabled="@Running"><option value="wildcard">Wildcard</option><option value="regex">Regex</option></select></label>
+            <label>Kind<select @bind="_kind" disabled="@Running"><option value="both">Folders and files</option><option value="dir">Folders</option><option value="file">Files</option></select></label>
+            <label>Depth<input type="number" min="0" max="32" @bind="_depth" disabled="@Running" /></label>
+            <label>From date<input type="date" @bind="_from" disabled="@Running" /></label>
+            <label>To date<input type="date" @bind="_to" disabled="@Running" /></label>
+            <label>Not older than (days)<input type="number" min="0" max="36500" @bind="_days" disabled="@Running" /></label>
+            <label>Min size (MiB)<input type="number" min="0" step="0.01" @bind="_minSize" disabled="@Running" /></label>
+            <label>Max size (MiB)<input type="number" min="0" step="0.01" @bind="_maxSize" disabled="@Running" /></label>
+            <label class="chk"><input type="checkbox" @bind="_caseSensitive" disabled="@Running" /> Case sensitive</label>
+            }
+        </div>
+    </section>
+    @if (!string.IsNullOrWhiteSpace(_message)) { <p role="status">@_message</p> }
+    @if (_search is { } search)
+    {
+        <div class="toolbar search-progress" role="status">
+            <strong>@search.Status</strong>
+            <span>@search.TotalMatches match(es)</span>
+            @if (search.Request.Recursive)
+            {
+                <span>@search.DirectoriesScanned folders scanned / @search.PendingDirectories pending</span>
+            }
+            else
+            {
+                <span>@search.CommandsCompleted SITE SEARCH command(s) / @search.CommandsPending pending</span>
+            }
+            <span class="search-current" title="@search.CurrentPath">@search.CurrentPath</span>
+        </div>
+        @if (search.Errors.Count > 0)
+        {
+            <details><summary>@search.Errors.Count search error(s)</summary><ul>@foreach (var error in search.Errors) { <li>@error</li> }</ul></details>
+        }
+        <div class="toolbar search-queue-toolbar">
+            <label>Destination<select @bind="_destinationSite"><option value="local">Local download</option>@foreach (var site in _sites) { <option value="@site.Name">@site.Name</option> }</select></label>
+            <label class="search-destination">Folder<input @bind="_destinationPath" /></label>
+            <button disabled="@(_selected.Count == 0)" @onclick="QueueSelected">Queue selected (@_selected.Count)</button>
+            <button class="secondary" @onclick="Export">Export JSON</button>
+        </div>
+        <div class="table-wrap">
+            <table class="data-table search-results">
+                <thead><tr><th><input type="checkbox" aria-label="Select page" checked="@(search.Results.Count > 0 && search.Results.All(r => _selected.Contains(r.Id)))" @onchange="SelectPage" /></th><th>Site</th><th>Name</th><th>Folder</th><th>Kind</th><th>Size</th><th>Date</th></tr></thead>
+                <tbody>
+                    @foreach (var result in search.Results)
+                    {
+                        <tr @key="result.Id">
+                            <td><input type="checkbox" aria-label="Select @result.Name" checked="@_selected.Contains(result.Id)" @onchange="e => SelectResult(result.Id, e.Value is true)" /></td>
+                            <td>@result.Site</td><td>@result.Name</td><td>@Parent(result.Path)</td><td>@result.Kind</td>
+                            <td>@(result.Kind != "file" ? "" : result.Size < 1048576 ? $"{result.Size:N0} B" : $"{result.Size / 1048576d:0.##} MiB")</td>
+                            <td>@(result.Modified == default ? "" : result.Modified.ToString("yyyy-MM-dd HH:mm"))</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <div class="toolbar">
+            <button class="secondary icon-btn" title="Previous page" disabled="@(_offset == 0)" @onclick="() => Page(-1)">&#8592;</button>
+            <span>Page @(_offset / 100 + 1) / @Math.Max(1, (search.TotalMatches + 99) / 100)</span>
+            <button class="secondary icon-btn" title="Next page" disabled="@(_offset + 100 >= search.TotalMatches)" @onclick="() => Page(1)">&#8594;</button>
+        </div>
+    }
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "id")] public string? SearchId { get; set; }
+    private List<Site> _sites = new();
+    private readonly HashSet<string> _siteNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<int> _selected = new();
+    private readonly CancellationTokenSource _stop = new();
+    private Task? _poll;
+    private SiteSearchSnapshot? _search;
+    private string _paths = "/", _include = "", _exclude = "", _kind = "both", _mode = "wildcard";
+    private string _destinationSite = "local", _destinationPath = "", _message = "";
+    private int _depth = 4, _maxResults = 1000, _offset;
+    private int? _days;
+    private decimal? _minSize, _maxSize;
+    private DateTime? _from, _to;
+    private bool _caseSensitive;
+    private bool _recursive;
+    private bool Running => _search?.Status == "running";
+
+    protected override void OnInitialized()
+    {
+        _sites = Engine.Sites(true);
+        if (_sites.Count > 0) _siteNames.Add(_sites[0].Name);
+        _poll = Poll();
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (!string.IsNullOrWhiteSpace(SearchId) && _search?.Id != SearchId)
+        {
+            _search = Engine.SiteSearch(SearchId);
+            _offset = 0; _selected.Clear();
+            if (_search is null) { _message = "Search expired or is no longer available"; return; }
+            var request = _search.Request;
+            _recursive = request.Recursive;
+            _siteNames.Clear(); _siteNames.UnionWith(request.Sites);
+            _paths = string.Join('\n', request.Paths); _include = request.Include; _exclude = request.Exclude;
+            _mode = request.Regex ? "regex" : "wildcard"; _kind = request.Kind; _depth = request.MaxDepth;
+            _maxResults = request.MaxResults; _from = request.DateFrom; _to = request.DateTo; _days = request.NotOlderThanDays;
+            _caseSensitive = request.CaseSensitive; _minSize = request.MinBytes / 1048576m; _maxSize = request.MaxBytes / 1048576m;
+        }
+    }
+
+    private async Task Poll()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_stop.Token))
+                await InvokeAsync(() => { if (Running) { Refresh(); StateHasChanged(); } });
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private void Start()
+    {
+        try
+        {
+            _search = Engine.StartSiteSearch(new SiteSearchRequest
+            {
+                Sites = _siteNames.ToList(), Paths = _paths.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList(),
+                Include = _include, Exclude = _exclude, Recursive = _recursive, Regex = _recursive && _mode == "regex",
+                Kind = _recursive ? _kind : "dir", CaseSensitive = _recursive && _caseSensitive,
+                MaxDepth = _depth, MaxResults = _maxResults, DateFrom = _recursive ? _from : null, DateTo = _recursive ? _to : null,
+                NotOlderThanDays = _recursive ? _days : null,
+                MinBytes = _recursive && _minSize is { } min ? checked((long)(min * 1048576)) : null,
+                MaxBytes = _recursive && _maxSize is { } max ? checked((long)(max * 1048576)) : null
+            });
+            _selected.Clear(); _offset = 0; _message = "";
+            Navigation.NavigateTo("/search?id=" + _search.Id, replace: true);
+        }
+        catch (Exception ex) { _message = ex.Message; }
+    }
+
+    private void Stop() { if (_search is not null) Engine.StopSiteSearch(_search.Id); }
+    private void Refresh() { if (_search is not null) _search = Engine.SiteSearch(_search.Id, _offset, 100); }
+    private void Page(int direction) { _offset = Math.Max(0, _offset + direction * 100); Refresh(); }
+    private void SelectSite(string site, bool selected) { if (selected) _siteNames.Add(site); else _siteNames.Remove(site); }
+    private void SelectResult(int id, bool selected) { if (selected) _selected.Add(id); else _selected.Remove(id); }
+    private void SelectPage(ChangeEventArgs args) { foreach (var result in _search!.Results) SelectResult(result.Id, args.Value is true); }
+    private static string Parent(string path) => path[..Math.Max(1, path.LastIndexOf('/'))];
+
+    private void QueueSelected()
+    {
+        try
+        {
+            var jobs = Engine.QueueSiteSearchResults(_search!.Id, new SiteSearchQueueRequest
+            { ResultIds = _selected.ToList(), DestinationSite = _destinationSite, DestinationPath = _destinationPath });
+            _message = $"Queued {jobs.Count} manual transfer(s)";
+            _selected.Clear();
+        }
+        catch (Exception ex) { _message = ex.Message; }
+    }
+
+    private async Task Export()
+    {
+        if (_search is null) return;
+        var data = System.Text.Json.JsonSerializer.Serialize(Engine.SiteSearch(_search.Id, 0, 10000),
+            new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower, WriteIndented = true });
+        await Js.InvokeVoidAsync("weaveFxp.downloadJson", $"search-{_search.Id}.json", data);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _stop.Cancel();
+        if (_poll is not null) await _poll;
+        _stop.Dispose();
+    }
+}

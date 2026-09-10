@@ -1,0 +1,304 @@
+@page "/favorites"
+@inject WeaveEngine Engine
+@inject NavigationManager Navigation
+
+<h1 class="visually-hidden">Favorites</h1>
+
+<div class="page favorites-page">
+    <header class="page-head page-head-lg">
+        <div>
+            <div class="eyebrow">Browser Windows</div>
+            <h2><span class="title-icon">★</span> Favorites</h2>
+            <p class="page-sub">@FavoriteCountLabel()</p>
+        </div>
+        <div class="page-actions">
+            <button class="secondary" @onclick="Reload">
+                <span class="btn-icon">↻</span>
+                Reload
+            </button>
+            <button class="secondary danger" disabled="@(_editingName is null)" @onclick="ConfirmDelete">
+                <span class="btn-icon">⌫</span>
+                Delete
+            </button>
+            <button class="secondary" disabled="@(!CanSave)" @onclick="SaveAndOpen">
+                <span class="btn-icon">⇄</span>
+                Open in Browser
+            </button>
+            <button disabled="@(!CanSave)" @onclick="Save">
+                <span class="btn-icon">▣</span>
+                Save favorite
+            </button>
+        </div>
+    </header>
+
+    <div class="favorites-manager">
+        <aside class="favorite-manager-list">
+            @if (_favorites.Count == 0)
+            {
+                <div class="muted sm-none">No favorites yet</div>
+            }
+            else
+            {
+                @foreach (var favorite in _favorites)
+                {
+                    <button class="favorite-manager-item @FavoriteClass(favorite)" @onclick="() => EditFavorite(favorite)">
+                        <span class="favorite-manager-name"><span aria-hidden="true">★</span> @favorite.Name</span>
+                        <span class="favorite-manager-site">@SiteLabel(favorite.Site)</span>
+                        <span class="favorite-manager-path" title="@favorite.RemotePath">@favorite.RemotePath</span>
+                    </button>
+                }
+            }
+        </aside>
+
+        <section class="favorite-manager-form">
+            <div class="manager-toolbar">
+                <label class="compact-field">Edit favorite
+                    <select value="@(_editingName ?? "")" @onchange="SelectExisting" disabled="@(_favorites.Count == 0)">
+                        <option value="" disabled>@(_favorites.Count == 0 ? "No favorites yet" : "Choose favorite...")</option>
+                        @foreach (var favorite in _favorites)
+                        {
+                            <option value="@favorite.Name">@favorite.Name</option>
+                        }
+                    </select>
+                </label>
+                <button class="secondary favorite-new-button" @onclick="NewFavorite">
+                    <span class="btn-icon">＋</span>
+                    New Favorite
+                </button>
+            </div>
+
+            <div class="favorite-editor-body">
+                @if (_sites.Count == 0)
+                {
+                    <div class="callout favorite-site-warning">
+                        No sites configured. <NavLink href="sites">Add a site</NavLink>
+                    </div>
+                }
+
+                <div class="favorite-form-grid">
+                    <label>Name
+                        <input @bind="_form.Name" @bind:event="oninput" placeholder="TV" />
+                    </label>
+                    <label>Site / server
+                        <select @bind="_form.Site" disabled="@(_sites.Count == 0)">
+                            <option value="">Select site</option>
+                            @foreach (var site in _sites)
+                            {
+                                <option value="@site.Name">@site.Name — @site.Host:@site.Port</option>
+                            }
+                        </select>
+                    </label>
+                    <label class="wide">Remote path
+                        <input @bind="_form.RemotePath" @bind:event="oninput" placeholder="/TV/" />
+                    </label>
+                    <label class="wide">Local path
+                        <input @bind="_form.LocalPath" @bind:event="oninput" placeholder="D:\Downloads\TV\" />
+                    </label>
+                    <label>Local pane
+                        <select @bind="_form.LocalSide">
+                            <option value="left">Left</option>
+                            <option value="right">Right</option>
+                        </select>
+                    </label>
+                </div>
+
+                @if (!string.IsNullOrWhiteSpace(_status))
+                {
+                    <div class="favorite-feedback @(_statusIsError ? "error" : "ok")">@_status</div>
+                }
+            </div>
+        </section>
+    </div>
+</div>
+
+@if (_deleteConfirmOpen)
+{
+    <div class="modal-backdrop" @onclick="CancelDelete"></div>
+    <section class="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-favorite-title">
+        <header>
+            <h3 id="delete-favorite-title">Delete Favorite</h3>
+            <button class="secondary icon-btn" title="Close" @onclick="CancelDelete">×</button>
+        </header>
+        <div class="confirm-body">
+            <p>Delete <strong>@_editingName</strong> from the shared Favorites list?</p>
+        </div>
+        <div class="modal-actions">
+            <button class="danger" @onclick="DeleteFavorite">Delete favorite</button>
+            <button class="secondary" @onclick="CancelDelete">Cancel</button>
+        </div>
+    </section>
+}
+
+@code {
+    private List<BrowserFavorite> _favorites = new();
+    private List<Site> _sites = new();
+    private BrowserFavorite _form = new();
+    private string? _editingName;
+    private string _status = "";
+    private bool _statusIsError;
+    private bool _deleteConfirmOpen;
+
+    private bool CanSave =>
+        !string.IsNullOrWhiteSpace(_form.Name) &&
+        !string.IsNullOrWhiteSpace(_form.Site) &&
+        !string.IsNullOrWhiteSpace(_form.RemotePath) &&
+        !string.IsNullOrWhiteSpace(_form.LocalPath) &&
+        _sites.Any(s => s.Name.Equals(_form.Site, StringComparison.OrdinalIgnoreCase));
+
+    protected override void OnInitialized()
+    {
+        Reload();
+        if (_favorites.Count > 0) EditFavorite(_favorites[0]);
+        else NewFavorite();
+    }
+
+    private void Reload()
+    {
+        _sites = Engine.Sites(true);
+        _favorites = Engine.Settings(true).BrowserFavorites
+            .OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(CloneFavorite)
+            .ToList();
+        if (_editingName is not null)
+        {
+            var selected = _favorites.FirstOrDefault(f => f.Name.Equals(_editingName, StringComparison.OrdinalIgnoreCase));
+            if (selected is not null) EditFavorite(selected);
+            else NewFavorite();
+        }
+    }
+
+    private void NewFavorite()
+    {
+        var settings = Engine.Settings(true);
+        _editingName = null;
+        _form = new BrowserFavorite
+        {
+            Site = _sites.FirstOrDefault()?.Name ?? "",
+            RemotePath = "/",
+            LocalPath = settings.DownloadDir,
+            LocalSide = "left",
+        };
+        SetStatus("");
+    }
+
+    private void EditFavorite(BrowserFavorite favorite)
+    {
+        _editingName = favorite.Name;
+        _form = CloneFavorite(favorite);
+        SetStatus("");
+    }
+
+    private void SelectExisting(ChangeEventArgs args)
+    {
+        var name = args.Value?.ToString() ?? "";
+        var favorite = _favorites.FirstOrDefault(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (favorite is not null) EditFavorite(favorite);
+    }
+
+    private void Save() => SaveFavorite(openAfterSave: false);
+    private void SaveAndOpen() => SaveFavorite(openAfterSave: true);
+
+    private void SaveFavorite(bool openAfterSave)
+    {
+        if (!TryNormalizeForm(out var saved, out var error))
+        {
+            SetStatus(error, true);
+            return;
+        }
+
+        var settings = Engine.Settings(true);
+        settings.BrowserFavorites.RemoveAll(f =>
+            (_editingName is not null && f.Name.Equals(_editingName, StringComparison.OrdinalIgnoreCase)) ||
+            f.Name.Equals(saved.Name, StringComparison.OrdinalIgnoreCase));
+        settings.BrowserFavorites.Add(saved);
+        Engine.UpdateSettings(settings);
+
+        _editingName = saved.Name;
+        Reload();
+        SetStatus($"Saved {saved.Name}");
+        if (openAfterSave)
+            Navigation.NavigateTo("browser?favorite=" + Uri.EscapeDataString(saved.Name));
+    }
+
+    private bool TryNormalizeForm(out BrowserFavorite favorite, out string error)
+    {
+        favorite = new BrowserFavorite();
+        error = "";
+        var name = (_form.Name ?? "").Trim();
+        var site = (_form.Site ?? "").Trim();
+        if (name.Length == 0) { error = "Name is required."; return false; }
+        if (!_sites.Any(s => s.Name.Equals(site, StringComparison.OrdinalIgnoreCase)))
+        {
+            error = "Select an existing site/server.";
+            return false;
+        }
+
+        string localPath;
+        try { localPath = Path.GetFullPath((_form.LocalPath ?? "").Trim()); }
+        catch (Exception ex) { error = "Local path: " + ex.Message; return false; }
+        if (string.IsNullOrWhiteSpace(_form.LocalPath)) { error = "Local path is required."; return false; }
+
+        var remotePath = NormalizeRemotePath(_form.RemotePath);
+        favorite = new BrowserFavorite
+        {
+            Name = name,
+            Site = site,
+            RemotePath = remotePath,
+            LocalPath = localPath,
+            LocalSide = AppSettings.NormalizeFavoriteLocalSide(_form.LocalSide) is { Length: > 0 } side ? side : "left",
+        };
+        return true;
+    }
+
+    private void ConfirmDelete()
+    {
+        if (_editingName is not null) _deleteConfirmOpen = true;
+    }
+
+    private void CancelDelete() => _deleteConfirmOpen = false;
+
+    private void DeleteFavorite()
+    {
+        if (_editingName is null) return;
+        var deleted = _editingName;
+        var settings = Engine.Settings(true);
+        settings.BrowserFavorites.RemoveAll(f => f.Name.Equals(deleted, StringComparison.OrdinalIgnoreCase));
+        Engine.UpdateSettings(settings);
+        _deleteConfirmOpen = false;
+        Reload();
+        NewFavorite();
+        SetStatus($"Deleted {deleted}");
+    }
+
+    private void SetStatus(string message, bool error = false)
+    {
+        _status = message;
+        _statusIsError = error;
+    }
+
+    private string FavoriteCountLabel() => _favorites.Count == 1 ? "1 saved favorite" : $"{_favorites.Count} saved favorites";
+    private string FavoriteClass(BrowserFavorite favorite) =>
+        _editingName is not null && favorite.Name.Equals(_editingName, StringComparison.OrdinalIgnoreCase) ? "current" : "";
+
+    private string SiteLabel(string siteName)
+    {
+        var site = _sites.FirstOrDefault(s => s.Name.Equals(siteName, StringComparison.OrdinalIgnoreCase));
+        return site is null ? siteName : $"{site.Name} · {site.Host}:{site.Port}";
+    }
+
+    private static string NormalizeRemotePath(string? path)
+    {
+        path = (path ?? "/").Trim().Replace('\\', '/');
+        if (path.Length == 0) return "/";
+        return path.StartsWith('/') ? path : "/" + path;
+    }
+
+    private static BrowserFavorite CloneFavorite(BrowserFavorite favorite) => new()
+    {
+        Name = favorite.Name,
+        Site = favorite.Site,
+        RemotePath = favorite.RemotePath,
+        LocalPath = favorite.LocalPath,
+        LocalSide = AppSettings.NormalizeFavoriteLocalSide(favorite.LocalSide) is { Length: > 0 } side ? side : "left",
+    };
+}

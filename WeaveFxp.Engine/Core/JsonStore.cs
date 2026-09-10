@@ -101,11 +101,35 @@ public sealed class JsonStore
         _jobArchive = new JobArchiveStore(System.IO.Path.Combine(_dir, "history.db"));
 
         LoadStateFromDisk();
+        var migrateGlobalSkiplist = (_state.Settings?.GlobalSkiplistDefaultsVersion ?? 0) <
+            AppSettings.CurrentGlobalSkiplistDefaultsVersion;
+        var migrateSiteSlots = (_state.Settings?.SiteSlotDefaultsVersion ?? 0) <
+            AppSettings.CurrentSiteSlotDefaultsVersion;
         Ensure();
         // Cull an oversized history from a previous run immediately, so a huge jobs.json
         // doesn't sit in memory (and get cloned every UI tick) until the next update.
         lock (_lock)
         {
+            // Persist defaults migrations once. After this marker is stored, removing a
+            // default pattern in Settings is an explicit choice and stays removed.
+            if (migrateGlobalSkiplist)
+                SaveLocked(StateSections.Settings, critical: true);
+            if (migrateSiteSlots)
+            {
+                // The original UI displayed 1/0/1 while the engine treated that exact
+                // tuple as automatic three-wide slots. Preserve that behavior when the
+                // now-explicit cbftp ALL semantics are introduced.
+                foreach (var site in _state.Sites.Values)
+                {
+                    if (site.LoginSlots == 1 && site.UploadSlots == 0 && site.DownloadSlots == 1)
+                    {
+                        site.LoginSlots = 0;
+                        site.DownloadSlots = 0;
+                    }
+                }
+                _state.Settings!.SiteSlotDefaultsVersion = AppSettings.CurrentSiteSlotDefaultsVersion;
+                SaveLocked(StateSections.Settings | StateSections.Sites, critical: true);
+            }
             if (PruneJobsLocked() > 0)
                 SaveLocked(StateSections.Jobs, critical: true);
         }

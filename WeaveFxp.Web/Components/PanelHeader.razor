@@ -1,0 +1,17 @@
+<div class="sub-editor-head panel-head">
+    <h3>@Title</h3>
+    <div class="inline-actions panel-head-actions">
+        @ChildContent
+        <button type="button" class="secondary slim panel-save-button" @onclick="OnSave">
+            <span class="btn-icon">▣</span>
+            @SaveLabel
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public string SaveLabel { get; set; } = "Save";
+    [Parameter] public EventCallback OnSave { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

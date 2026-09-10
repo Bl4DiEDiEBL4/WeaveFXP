@@ -61,7 +61,7 @@
                         <NavLink class="dash-job" href="@RaceHref(job)" aria-label="@($"Open {Label(job)} in races")">
                             <span class="badge @StateClass(job.State)">@job.State.ToString().ToLowerInvariant()</span>
                             <strong>@Label(job)</strong>
-                            <span>@job.Request.FromSite -> @job.Request.ToSite</span>
+                            <span title="@RouteSites(job)">@DisplayRoute(job)</span>
                             <span class="job-bar"><span class="job-bar-fill @(dashboardPercent < 0 ? "indet" : "")" style="width:@(dashboardPercent < 0 ? 100 : dashboardPercent)%"></span></span>
                             <span class="mono dim dash-job-stats">@Progress(job)</span>
                         </NavLink>
@@ -90,9 +90,9 @@
 </div>
 
 @code {
-    private List<Job> Jobs => Engine.Jobs();
-    private List<Site> Sites => Engine.Sites(true);
-    private List<LogEntry> RecentLogs => Engine.RecentLogs(30);
+    private List<Job> Jobs { get; set; } = new();
+    private List<Site> Sites { get; set; } = new();
+    private List<LogEntry> RecentLogs { get; set; } = new();
     private List<Job> ActiveJobs => Jobs.Where(j => j.State is JobState.Running or JobState.Queued).OrderByDescending(j => j.CreatedAt).ToList();
     private int RunningJobs => Jobs.Count(j => j.State == JobState.Running);
     private int QueuedJobs => Jobs.Count(j => j.State == JobState.Queued);
@@ -108,9 +108,31 @@
     }
     private long TotalMoved => Jobs.Where(j => j.State == JobState.Running).Sum(j => j.CumulativeBytes);
 
-    protected override void OnInitialized() => Engine.Changed += OnChanged;
+    protected override void OnInitialized()
+    {
+        Refresh();
+        Engine.Changed += OnChanged;
+    }
     public void Dispose() => Engine.Changed -= OnChanged;
-    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+    private int _refreshQueued;
+
+    private void OnChanged()
+    {
+        if (Interlocked.Exchange(ref _refreshQueued, 1) != 0) return;
+        _ = InvokeAsync(() =>
+        {
+            Interlocked.Exchange(ref _refreshQueued, 0);
+            Refresh();
+            StateHasChanged();
+        });
+    }
+
+    private void Refresh()
+    {
+        Jobs = Engine.Jobs();
+        Sites = Engine.Sites(true);
+        RecentLogs = Engine.RecentLogs(30);
+    }
 
     private static string Label(Job job)
     {
@@ -118,6 +140,14 @@
         var path = job.Request.SourcePath.TrimEnd('/', '\\');
         return Path.GetFileName(path.Replace('\\', '/'));
     }
+
+    private static string DisplayRoute(Job job) => job.Request.MeshSites.Count > 1
+        ? "Mesh"
+        : $"{job.Request.FromSite} → {job.Request.ToSite}";
+
+    private static string RouteSites(Job job) => job.Request.MeshSites.Count > 1
+        ? string.Join(" ↔ ", job.Request.MeshSites)
+        : $"{job.Request.FromSite} → {job.Request.ToSite}";
 
     private static string Progress(Job job)
     {

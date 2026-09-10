@@ -1,6 +1,7 @@
 @inherits LayoutComponentBase
 @inject Microsoft.Extensions.Hosting.IHostApplicationLifetime AppLifetime
 @inject WeaveEngine Engine
+@inject IJSRuntime Js
 
 <div class="app">
     <aside class="sidebar">
@@ -33,6 +34,10 @@
                         <span class="nav-glyph">⇄</span>
                         Browse
                     </NavLink>
+                    <NavLink class="nav-item" href="favorites">
+                        <span class="nav-glyph">★</span>
+                        Favorites
+                    </NavLink>
                     <NavLink class="nav-item" href="races">
                         <span class="nav-glyph">⚑</span>
                         Races
@@ -45,6 +50,10 @@
                     <NavLink class="nav-item" href="sites">
                         <span class="nav-glyph">▤</span>
                         Site Manager
+                    </NavLink>
+                    <NavLink class="nav-item" href="search">
+                        <span class="nav-glyph">&#8981;</span>
+                        Site Search
                     </NavLink>
                 </div>
             </div>
@@ -87,6 +96,10 @@
                 <strong>WeaveFXP</strong>
             </div>
             <div class="header-actions">
+                <button type="button" class="top-btn palette-switch" title="Palette: @CurrentPalette.Label. Click for @NextPalette.Label." @onclick="CyclePalette">
+                    <span class="palette-swatch" aria-hidden="true"></span>
+                    @CurrentPalette.Label
+                </button>
                 <NavLink class="top-btn" href="browser">
                     <span class="btn-icon">⇄</span>
                     Browse
@@ -113,5 +126,35 @@
 </div>
 
 @code {
+    private static readonly Palette[] Palettes =
+    {
+        new("circuit", "Circuit"),
+        new("graphite", "Graphite"),
+        new("signal", "Signal"),
+        new("voltage", "Voltage"),
+        new("daylight", "Daylight"),
+    };
+
+    private int _paletteIndex;
+    private Palette CurrentPalette => Palettes[_paletteIndex];
+    private Palette NextPalette => Palettes[(_paletteIndex + 1) % Palettes.Length];
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        var selected = await Js.InvokeAsync<string>("weaveFxp.getPalette");
+        var index = Array.FindIndex(Palettes, palette => palette.Id.Equals(selected, StringComparison.OrdinalIgnoreCase));
+        _paletteIndex = index < 0 ? 0 : index;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task CyclePalette()
+    {
+        _paletteIndex = (_paletteIndex + 1) % Palettes.Length;
+        await Js.InvokeVoidAsync("weaveFxp.setPalette", CurrentPalette.Id);
+    }
+
     private void StopEngine() => AppLifetime.StopApplication();
+
+    private sealed record Palette(string Id, string Label);
 }

@@ -14,7 +14,7 @@ OUT="$ROOT/Release"
 ZIPOUT="$OUT/zips"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/weavefxp-publish.XXXXXX")"
 PROJ="$ROOT/WeaveFxp.Web/WeaveFxp.Web.csproj"
-VERSION="1.0.1"
+VERSION="1.0.2"
 LEGACY_DATA="$OUT/data"
 LEGACY_DATA_SEED="$WORK/legacy-data"
 
@@ -34,7 +34,7 @@ if command -v python3 >/dev/null 2>&1; then
 import sys
 import xml.etree.ElementTree as ET
 root = ET.parse(sys.argv[1]).getroot()
-print(root.findtext("./PropertyGroup/Version") or "1.0.1")
+print(root.findtext("./PropertyGroup/Version") or "1.0.2")
 PY
 )"
 fi

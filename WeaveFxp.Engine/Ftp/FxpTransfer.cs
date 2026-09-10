@@ -160,11 +160,37 @@ public static class FxpTransfer
     public static bool IsDestinationDupeError(Exception ex)
     {
         var m = ex.Message ?? "";
+        if (IsBeingUploaded(ex)) return false;
         return m.Contains("x-dupe", StringComparison.OrdinalIgnoreCase)
-            || m.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+            || m.Contains("already exists", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("file exists", StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool RequiresConnectionDrop(Exception ex) => ex is DirtyControlChannelException;
+
+    public static bool IsDestinationBusyError(Exception ex)
+    {
+        var m = ex.Message ?? "";
+        return m.Contains("uploaded by", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("upload already in progress", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("upload in progress", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Some glftpd setups enforce a lower per-user transfer limit than the login-slot
+    // count configured in the client. Learn the advertised limit instead of repeatedly
+    // spending a connection and a retry on the same 550 response.
+    public static bool TryGetServerSlotLimit(Exception ex, out bool downloadLimit, out int limit)
+    {
+        downloadLimit = false;
+        limit = 0;
+        var match = Regex.Match(ex.Message ?? "",
+            @"maximum(?:\s+of)?\s+(\d+)\s+simultaneous\s+(downloads?|uploads?)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success || !int.TryParse(match.Groups[1].Value, out limit) || limit < 1)
+            return false;
+        downloadLimit = match.Groups[2].Value.StartsWith("download", StringComparison.OrdinalIgnoreCase);
+        return true;
+    }
 
     // The file exists on source but isn't finished uploading yet (glftpd:
     // "No Permission To Download A File Currently Being Uploaded"). Not an error —

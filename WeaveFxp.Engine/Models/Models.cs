@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using WeaveFxp.Engine.Ftp;
 
 namespace WeaveFxp.Engine.Models;
 
@@ -39,22 +40,44 @@ public sealed class PortRange
     public int End { get; set; } = 47800;
 }
 
+public sealed class BrowserFavorite
+{
+    public string Name { get; set; } = "";
+    public string Site { get; set; } = "";
+    public string RemotePath { get; set; } = "/";
+    public string LocalPath { get; set; } = "";
+    public string LocalSide { get; set; } = "";
+}
+
 public sealed class AppSettings
 {
     public const int DefaultRacePollIntervalMs = 250;
+    public const int CurrentGlobalSkiplistDefaultsVersion = 1;
+    public const int CurrentSiteSlotDefaultsVersion = 1;
+    private static readonly string[] DefaultGlobalSkiplistPatterns =
+        { ".tvmaze", ".imdb", "file_id.diz", ".txt" };
 
     public string WebBindAddress { get; set; } = "127.0.0.1";
     public int WebPort { get; set; } = 8788;
+    public bool AutoOpenWebUi { get; set; } = true;
     public string BindInterface { get; set; } = "";
     public TransferProtocol LocalTransferProtocol { get; set; } = TransferProtocol.PreferIPv4;
     public PortRange ActiveModePortRange { get; set; } = new();
     public bool UseActiveModeAddress { get; set; } = true;
     public string ActiveModeAddressIPv4 { get; set; } = "";
     public string ActiveModeAddressIPv6 { get; set; } = "";
+    public string Proxy { get; set; } = "";
+    public string ProxyUsername { get; set; } = "";
+    public string ProxyPassword { get; set; } = "";
+    public bool ProxyPasswordSet { get; set; }
+    public string DataProxy { get; set; } = "";
+    public string DataProxyUsername { get; set; } = "";
+    public string DataProxyPassword { get; set; } = "";
+    public bool DataProxyPasswordSet { get; set; }
     public bool EnableHttpsJsonApi { get; set; } = true;
     public int HttpsJsonApiPort { get; set; } = 59010;
     public bool EnableUdpApi { get; set; }
-    public string UdpApiMode { get; set; } = "plaintext";
+    public string UdpApiMode { get; set; } = "auto";
     public int UdpApiPort { get; set; } = 59010;
 
     // Never serialized to the client; only ever written back from the settings form.
@@ -65,6 +88,10 @@ public sealed class AppSettings
     public string DownloadDir { get; set; } = "downloads";
     public int LocalDownloadSlots { get; set; } = 8;
     public int LocalUploadSlots { get; set; } = 8;
+    public bool SkipExactSizeLocalFiles { get; set; } = true;
+    public bool ResumePartialDownloads { get; set; } = true;
+    public bool VerifyLocalDownloadsWithSfv { get; set; } = true;
+    public List<BrowserFavorite> BrowserFavorites { get; set; } = new();
     public int TcpSendBufferKBytes { get; set; } = 1024;
     public int TcpReceiveBufferKBytes { get; set; } = 1024;
     public int MaxConcurrentFxpJobs { get; set; } = 2;
@@ -83,8 +110,10 @@ public sealed class AppSettings
     public int JobWatchdogTimeoutMinutes { get; set; } = 120;
     public bool SkipEmptyFolders { get; set; } = true;
     public List<string> GlobalSkiplist { get; set; } = new();
+    public int GlobalSkiplistDefaultsVersion { get; set; }
     public List<string> GlobalOrderList { get; set; } = new();
     public List<string> SiteOrder { get; set; } = new();
+    public int SiteSlotDefaultsVersion { get; set; }
     public bool DebugLogging { get; set; }
     public bool CheckForUpdates { get; set; } = true;
     public bool TrayIconEnabled { get; set; } = true;
@@ -99,8 +128,23 @@ public sealed class AppSettings
         BindInterface = (BindInterface ?? "").Trim();
         ActiveModeAddressIPv4 = (ActiveModeAddressIPv4 ?? "").Trim();
         ActiveModeAddressIPv6 = (ActiveModeAddressIPv6 ?? "").Trim();
+        ProxyUsername = (ProxyUsername ?? "").Trim();
+        DataProxyUsername = (DataProxyUsername ?? "").Trim();
+        var proxyUsername = ProxyUsername;
+        var proxyPassword = ProxyPassword ?? "";
+        Proxy = TcpProxy.Normalize(Proxy, ref proxyUsername, ref proxyPassword);
+        ProxyUsername = proxyUsername;
+        ProxyPassword = proxyPassword;
+        var dataProxyUsername = DataProxyUsername;
+        var dataProxyPassword = DataProxyPassword ?? "";
+        DataProxy = TcpProxy.Normalize(DataProxy, ref dataProxyUsername, ref dataProxyPassword);
+        DataProxyUsername = dataProxyUsername;
+        DataProxyPassword = dataProxyPassword;
+        ProxyPasswordSet = !string.IsNullOrEmpty(ProxyPassword);
+        DataProxyPasswordSet = !string.IsNullOrEmpty(DataProxyPassword);
         ApiPassword = (ApiPassword ?? "").Trim();
-        UdpApiMode = string.IsNullOrWhiteSpace(UdpApiMode) ? "plaintext" : UdpApiMode.Trim();
+        UdpApiMode = string.IsNullOrWhiteSpace(UdpApiMode) ? "auto" : UdpApiMode.Trim().ToLowerInvariant();
+        if (UdpApiMode is not ("auto" or "plaintext" or "encrypted")) UdpApiMode = "auto";
         DownloadDir = string.IsNullOrWhiteSpace(DownloadDir) ? "downloads" : DownloadDir.Trim();
         ActiveModePortRange ??= new PortRange();
         if (ActiveModePortRange.Start == 0) ActiveModePortRange.Start = 47700;
@@ -112,10 +156,23 @@ public sealed class AppSettings
         if (MaxConcurrentRaceJobs == 0) MaxConcurrentRaceJobs = 2;
         if (StoredJobHistoryLimit == 0) StoredJobHistoryLimit = 150;
         StoredJobHistoryLimit = Math.Clamp(StoredJobHistoryLimit, 25, 150);
-        if (LocalDownloadSlots == 0) LocalDownloadSlots = 8;
-        LocalDownloadSlots = Math.Clamp(LocalDownloadSlots, 1, 64);
-        if (LocalUploadSlots == 0) LocalUploadSlots = 8;
-        LocalUploadSlots = Math.Clamp(LocalUploadSlots, 1, 64);
+        LocalDownloadSlots = Math.Clamp(LocalDownloadSlots, 0, 64);
+        LocalUploadSlots = Math.Clamp(LocalUploadSlots, 0, 64);
+        BrowserFavorites = (BrowserFavorites ?? new List<BrowserFavorite>())
+            .Where(f => f is not null)
+            .Select(f => new BrowserFavorite
+            {
+                Name = (f.Name ?? "").Trim(),
+                Site = (f.Site ?? "").Trim(),
+                RemotePath = string.IsNullOrWhiteSpace(f.RemotePath) ? "/" : f.RemotePath.Trim(),
+                LocalPath = (f.LocalPath ?? "").Trim(),
+                LocalSide = NormalizeFavoriteLocalSide(f.LocalSide),
+            })
+            .Where(f => f.Name.Length > 0 && f.Site.Length > 0 && f.LocalPath.Length > 0)
+            .GroupBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .Take(100)
+            .ToList();
         TcpSendBufferKBytes = Math.Clamp(TcpSendBufferKBytes, 0, 16384);
         TcpReceiveBufferKBytes = Math.Clamp(TcpReceiveBufferKBytes, 0, 16384);
         FxpTlsRoleFlip ??= new Dictionary<string, bool>();
@@ -131,6 +188,13 @@ public sealed class AppSettings
         if (JobWatchdogTimeoutMinutes == 0) JobWatchdogTimeoutMinutes = 120;
         JobWatchdogTimeoutMinutes = Math.Clamp(JobWatchdogTimeoutMinutes, 5, 10080);
         GlobalSkiplist = NormalizeList(GlobalSkiplist);
+        if (GlobalSkiplistDefaultsVersion < CurrentGlobalSkiplistDefaultsVersion)
+        {
+            foreach (var pattern in DefaultGlobalSkiplistPatterns)
+                if (!GlobalSkiplist.Contains(pattern, StringComparer.OrdinalIgnoreCase))
+                    GlobalSkiplist.Add(pattern);
+            GlobalSkiplistDefaultsVersion = CurrentGlobalSkiplistDefaultsVersion;
+        }
         GlobalOrderList = NormalizeList(GlobalOrderList);
         SiteOrder = NormalizeList(SiteOrder);
         var now = DateTime.UtcNow;
@@ -161,12 +225,14 @@ public sealed class AppSettings
             throw new ArgumentException("max concurrent fxp jobs must be at least 1");
         if (MaxConcurrentRaceJobs < 1)
             throw new ArgumentException("max concurrent race jobs must be at least 1");
-        if (LocalDownloadSlots < 1 || LocalUploadSlots < 1)
-            throw new ArgumentException("local transfer slots must be at least 1");
+        if (LocalDownloadSlots < 0 || LocalUploadSlots < 0)
+            throw new ArgumentException("local transfer slots cannot be negative");
         if (TcpSendBufferKBytes < 0 || TcpReceiveBufferKBytes < 0)
             throw new ArgumentException("tcp buffer sizes cannot be negative");
         if (JobWatchdogTimeoutMinutes < 5)
             throw new ArgumentException("job watchdog timeout must be at least 5 minutes");
+        TcpProxy.Validate(Proxy, "control proxy");
+        TcpProxy.Validate(DataProxy, "data proxy");
     }
 
     // Public() strips the password and reports only whether one is set.
@@ -175,11 +241,29 @@ public sealed class AppSettings
         var clone = (AppSettings)MemberwiseClone();
         clone.ApiPasswordSet = !string.IsNullOrEmpty(ApiPassword);
         clone.ApiPassword = "";
+        clone.ProxyPasswordSet = !string.IsNullOrEmpty(ProxyPassword);
+        clone.ProxyPassword = "";
+        clone.DataProxyPasswordSet = !string.IsNullOrEmpty(DataProxyPassword);
+        clone.DataProxyPassword = "";
         clone.ActiveModePortRange = new PortRange { Start = ActiveModePortRange.Start, End = ActiveModePortRange.End };
         clone.GlobalSkiplist = new List<string>(GlobalSkiplist);
         clone.GlobalOrderList = new List<string>(GlobalOrderList);
         clone.SiteOrder = new List<string>(SiteOrder);
+        clone.BrowserFavorites = BrowserFavorites.Select(f => new BrowserFavorite
+        {
+            Name = f.Name,
+            Site = f.Site,
+            RemotePath = f.RemotePath,
+            LocalPath = f.LocalPath,
+            LocalSide = NormalizeFavoriteLocalSide(f.LocalSide),
+        }).ToList();
         return clone;
+    }
+
+    public static string NormalizeFavoriteLocalSide(string? side)
+    {
+        side = (side ?? "").Trim().ToLowerInvariant();
+        return side is "left" or "right" ? side : "";
     }
 }
 
@@ -198,27 +282,29 @@ public sealed class Site
     public int Port { get; set; } = 21;
     public string Username { get; set; } = "anonymous";
     public string Password { get; set; } = "";
-    public TlsMode TlsMode { get; set; } = TlsMode.Off;
+    public TlsMode TlsMode { get; set; } = TlsMode.Explicit;
     public bool UsePret { get; set; }
     public bool UseEpsv { get; set; }
     public bool UseSscn { get; set; }
     public bool CeprSupported { get; set; }
-    public bool SscnSupported { get; set; }
-    public bool CpsvSupported { get; set; }
+    public bool SscnSupported { get; set; } = true;
+    public bool CpsvSupported { get; set; } = true;
     public FxpMode FxpMode { get; set; } = FxpMode.Auto;
     public string PassiveHost { get; set; } = "";
     public string BasePath { get; set; } = "/";
     public string ListCommand { get; set; } = "STAT -l";
-    public int LoginSlots { get; set; } = 1;
+    // 0 is automatic/unlimited, matching cbftp. The engine applies a sane pool cap.
+    public int LoginSlots { get; set; }
     public int UploadSlots { get; set; }
-    public int DownloadSlots { get; set; } = 1;
+    // 0 matches cbftp's ALL semantics: use the site's available login slots.
+    public int DownloadSlots { get; set; }
     public bool ForceBinary { get; set; }
     public bool BrokenPasv { get; set; }
     // FXP data-channel roles. Auto = source passive unless it has broken PASV; the
     // passive side is the TLS client.
     public FxpPassiveSide FxpPassiveSide { get; set; } = FxpPassiveSide.Auto;
     public SslDataClientSide SslDataClient { get; set; } = SslDataClientSide.Auto;
-    public bool UseXdupe { get; set; }
+    public bool UseXdupe { get; set; } = true;
     public int XdupeMode { get; set; } = 3;
     public int MaxIdleSeconds { get; set; } = 30;
     public bool AllowUpload { get; set; }
@@ -270,8 +356,9 @@ public sealed class Site
         if (Port == 0) Port = TlsMode == TlsMode.Implicit ? 990 : 21;
         if (string.IsNullOrEmpty(Username)) Username = "anonymous";
         if (string.IsNullOrEmpty(ListCommand)) ListCommand = "STAT -l";
-        if (LoginSlots == 0) LoginSlots = 1;
-        if (DownloadSlots == 0) DownloadSlots = 1;
+        LoginSlots = Math.Clamp(LoginSlots, 0, 40);
+        UploadSlots = Math.Clamp(UploadSlots, 0, LoginSlots > 0 ? LoginSlots : 40);
+        DownloadSlots = Math.Clamp(DownloadSlots, 0, LoginSlots > 0 ? LoginSlots : 40);
         if (MaxIdleSeconds == 0) MaxIdleSeconds = 30;
         if (XdupeMode == 0) XdupeMode = 3;
         if (TimeoutSeconds == 0) TimeoutSeconds = 30;
@@ -367,6 +454,7 @@ public sealed class TransferRequest
     public string SourcePath { get; set; } = "";
     public string DestPath { get; set; } = "";
     public List<string> MeshSites { get; set; } = new();
+    public Dictionary<string, string> SitePaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public bool Race { get; set; }
     public bool DryRun { get; set; }
     public string Label { get; set; } = "";
@@ -390,6 +478,7 @@ public sealed class SpreadRequest
     public List<string> ToSites { get; set; } = new();
     public string SourcePath { get; set; } = "";
     public string DestPath { get; set; } = "";
+    public Dictionary<string, string> SitePaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public bool Race { get; set; }
     public bool DryRun { get; set; }
     public string Label { get; set; } = "";
@@ -452,6 +541,7 @@ public sealed class Job
     public long CumulativeBytes { get; set; }
     public double SpeedBps { get; set; }
     public int FilesDone { get; set; }
+    public int FilesCovered { get; set; }
     public int FilesTotal { get; set; }
     public string CurrentFile { get; set; } = "";
     public bool Paused { get; set; }
@@ -470,7 +560,11 @@ public sealed class Job
         get
         {
             if (BytesTotal > 0) return (int)Math.Clamp(BytesDone * 100 / BytesTotal, 0, 100);
-            if (FilesTotal > 0) return (int)Math.Clamp((long)FilesDone * 100 / FilesTotal, 0, 100);
+            if (FilesTotal > 0)
+            {
+                var covered = Request.MeshSites.Count > 1 ? FilesCovered : Math.Max(FilesDone, FilesCovered);
+                return (int)Math.Clamp((long)covered * 100 / FilesTotal, 0, 100);
+            }
             return -1;
         }
     }
@@ -496,6 +590,8 @@ public sealed class FileTransfer
 {
     public DateTime StartedAt { get; set; }
     public string Name { get; set; } = "";
+    public string FromSite { get; set; } = "";
+    public string ToSite { get; set; } = "";
     public long Size { get; set; }
     public double Seconds { get; set; }              // 0 while in flight
     public double Bps { get; set; }                  // snapshot: size / duration

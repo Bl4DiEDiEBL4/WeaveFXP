@@ -26,6 +26,7 @@
             <table class="info-table">
                 <tbody>
                     <tr><td>Listening on</td><td>@_form.WebBindAddress:@_form.WebPort</td></tr>
+                    <tr><td>Startup</td><td>@(_form.AutoOpenWebUi ? "Open WebUI" : "Tray only")</td></tr>
                     <tr><td>Reachable from</td><td><span class="pill @(_form.WebBindAddress is "127.0.0.1" or "localhost" ? "on" : "busy")">@ReachLabel()</span></td></tr>
                     <tr><td>Version</td><td>v@(Engine.Version)</td></tr>
                 </tbody>
@@ -34,7 +35,13 @@
         </article>
 
         <article class="card">
-            <div class="card-title">ENGINE</div>
+            <div class="card-title-row">
+                <div class="card-title">ENGINE</div>
+                <button type="button" class="secondary slim panel-save-button" @onclick="Save">
+                    <span class="btn-icon">▣</span>
+                    Save
+                </button>
+            </div>
             <label class="opt"><input type="checkbox" @bind="_form.DebugLogging" /> <span><span class="opt-name">Debug logging</span><span class="fh">Verbose diagnostics for troubleshooting.</span></span></label>
             <label class="opt"><input type="checkbox" @bind="_form.UseActiveModeAddress" /> <span><span class="opt-name">Active address</span><span class="fh">Use the configured active-mode IP when needed.</span></span></label>
             <label class="compact-field">Hot JSON jobs<input type="number" min="25" max="150" @bind="_form.StoredJobHistoryLimit" /></label>
@@ -42,13 +49,25 @@
         </article>
 
         <article class="card">
-            <div class="card-title">UPDATES</div>
+            <div class="card-title-row">
+                <div class="card-title">UPDATES</div>
+                <button type="button" class="secondary slim panel-save-button" @onclick="Save">
+                    <span class="btn-icon">▣</span>
+                    Save
+                </button>
+            </div>
             <label class="opt"><input type="checkbox" @bind="_form.CheckForUpdates" /> <span><span class="opt-name">Check for updates</span><span class="fh">Shows update status later; no popup and no automatic install.</span></span></label>
             <table class="info-table tight"><tbody><tr><td>Current version</td><td>v@(Engine.Version)</td></tr></tbody></table>
         </article>
 
         <article class="card">
-            <div class="card-title">NOTIFICATIONS</div>
+            <div class="card-title-row">
+                <div class="card-title">NOTIFICATIONS</div>
+                <button type="button" class="secondary slim panel-save-button" @onclick="Save">
+                    <span class="btn-icon">▣</span>
+                    Save
+                </button>
+            </div>
             <label class="opt"><input type="checkbox" @bind="_form.TrayIconEnabled" /> <span><span class="opt-name">Tray icon</span><span class="fh">Windows notification area icon with dashboard, notification and stop controls.</span></span></label>
             <label class="opt"><input type="checkbox" @bind="_form.TransferNotificationsEnabled" disabled="@(!_form.TrayIconEnabled)" /> <span><span class="opt-name">Transfer notifications</span><span class="fh">Notify completed and failed transfer jobs.</span></span></label>
             <label class="opt"><input type="checkbox" @bind="_form.ApiNotificationsEnabled" disabled="@(!_form.TrayIconEnabled)" /> <span><span class="opt-name">API notifications</span><span class="fh">Notify important API-triggered activity.</span></span></label>
@@ -118,16 +137,17 @@
             {
                 <div class="panel-grid">
                     <section class="panel-card">
-                        <h3>WebUI Access</h3>
+                        <PanelHeader Title="WebUI Access" SaveLabel="Save settings" OnSave="Save" />
                         <div class="callout">Change the WebUI port and bind address here. Save and restart WeaveFXP for these startup settings to apply.</div>
                         <div class="form-grid">
                             <label>Bind address<input @bind="_form.WebBindAddress" placeholder="127.0.0.1" /></label>
                             <label>Port<input type="number" @bind="_form.WebPort" /></label>
                         </div>
+                        <label class="opt"><input type="checkbox" @bind="_form.AutoOpenWebUi" /> <span><span class="opt-name">Open WebUI on startup</span><span class="fh">Launch the dashboard in your browser when the exe starts.</span></span></label>
                     </section>
 
                     <section class="panel-card">
-                        <h3>Remote / SSL</h3>
+                        <PanelHeader Title="Remote / SSL" SaveLabel="Save settings" OnSave="Save" />
                         <div class="callout">Recommended public setup: keep WeaveFXP listening on 127.0.0.1 and put a reverse proxy with HTTPS in front of it.</div>
                         <label class="wide text-block">Caddy example
                             <textarea readonly rows="4">weavefxp.example.com {
@@ -141,7 +161,7 @@
             {
                 <div class="panel-grid">
                     <section class="panel-card">
-                        <h3>Network</h3>
+                        <PanelHeader Title="Network" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label class="wide">Bind interface
                                 <select @bind="_form.BindInterface">
@@ -164,7 +184,7 @@
                     </section>
 
                     <section class="panel-card">
-                        <h3>Active Mode</h3>
+                        <PanelHeader Title="Active Mode" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>Port start<input type="number" @bind="_form.ActiveModePortRange.Start" /></label>
                             <label>Port end<input type="number" @bind="_form.ActiveModePortRange.End" /></label>
@@ -175,23 +195,34 @@
                             </div>
                         </div>
                     </section>
+
+                    <section class="panel-card proxy-card">
+                        <PanelHeader Title="Proxy" SaveLabel="Save settings" OnSave="Save" />
+                        <div class="form-grid">
+                            <label class="wide">Control proxy<input @bind="_form.Proxy" placeholder="socks5://host:port or http://host:port" /></label>
+                            <label>Control user<input @bind="_form.ProxyUsername" /></label>
+                            <label>Control password<input type="password" @bind="_proxyPassword" placeholder="unchanged if empty" /></label>
+                            <label class="wide">Data proxy<input @bind="_form.DataProxy" placeholder="empty inherits control; direct bypasses it" /></label>
+                            <label>Data user<input @bind="_form.DataProxyUsername" /></label>
+                            <label>Data password<input type="password" @bind="_dataProxyPassword" placeholder="unchanged if empty" /></label>
+                        </div>
+                    </section>
                 </div>
             }
             else if (_tab == "transfers")
             {
                 <div class="panel-grid">
                     <section class="panel-card">
-                        <h3>Concurrency</h3>
+                        <PanelHeader Title="FXP / Race Jobs" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>Max FXP jobs<input type="number" @bind="_form.MaxConcurrentFxpJobs" /></label>
                             <label>Max race jobs<input type="number" @bind="_form.MaxConcurrentRaceJobs" /></label>
-                            <label>Local download slots<input type="number" min="1" max="64" @bind="_form.LocalDownloadSlots" /></label>
-                            <label>Local upload slots<input type="number" min="1" max="64" @bind="_form.LocalUploadSlots" /></label>
                         </div>
+                        <p class="fh">These limits control how many FXP and race jobs may run at the same time.</p>
                     </section>
 
                     <section class="panel-card">
-                        <h3>Racing</h3>
+                        <PanelHeader Title="Racing" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>Poll interval (ms)<input type="number" min="25" max="30000" @bind="_form.RacePollIntervalMs" /></label>
                             <label>Stop after idle cycles<input type="number" min="1" @bind="_form.RaceMaxIdleCycles" /></label>
@@ -205,7 +236,7 @@
                     </section>
 
                     <section class="panel-card">
-                        <h3>TCP tuning</h3>
+                        <PanelHeader Title="TCP tuning" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>Send buffer (KB)<input type="number" min="0" max="16384" @bind="_form.TcpSendBufferKBytes" /></label>
                             <label>Receive buffer (KB)<input type="number" min="0" max="16384" @bind="_form.TcpReceiveBufferKBytes" /></label>
@@ -214,7 +245,7 @@
                     </section>
 
                     <section class="panel-card">
-                        <h3>Local</h3>
+                        <PanelHeader Title="Local" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label class="wide">Download folder
                                 <span class="input-action">
@@ -222,11 +253,33 @@
                                     <button type="button" class="secondary slim" @onclick="OpenFolderPicker">Browse</button>
                                 </span>
                             </label>
+                            <label>Download slots
+                                <select @bind="_form.LocalDownloadSlots">
+                                    <option value="0">ALL</option>
+                                    @foreach (var slot in Enumerable.Range(1, 64))
+                                    {
+                                        <option value="@slot">@slot</option>
+                                    }
+                                </select>
+                            </label>
+                            <label>Upload slots
+                                <select @bind="_form.LocalUploadSlots">
+                                    <option value="0">ALL</option>
+                                    @foreach (var slot in Enumerable.Range(1, 64))
+                                    {
+                                        <option value="@slot">@slot</option>
+                                    }
+                                </select>
+                            </label>
                         </div>
+                        <p class="fh">ALL inherits the effective Site Manager slots for the connected server, including the login-slot cap.</p>
+                        <label class="opt"><input type="checkbox" @bind="_form.SkipExactSizeLocalFiles" /> <span><span class="opt-name">Skip existing files with the same size</span><span class="fh">Applies to local downloads and uploads. Matching files count as complete without transferring them again.</span></span></label>
+                        <label class="opt"><input type="checkbox" @bind="_form.ResumePartialDownloads" /> <span><span class="opt-name">Resume partial downloads</span><span class="fh">Continue smaller local files with FTP REST when supported; otherwise restart that file safely.</span></span></label>
+                        <label class="opt"><input type="checkbox" @bind="_form.VerifyLocalDownloadsWithSfv" /> <span><span class="opt-name">Verify downloaded releases with SFV</span><span class="fh">Shows a live zipscript-style folder banner during local downloads, then checks CRC32 and creates COMPLETE or per-file .missing markers.</span></span></label>
                     </section>
 
                     <section class="panel-card">
-                        <h3>Behavior</h3>
+                        <PanelHeader Title="Behavior" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>Job timeout (minutes)<input type="number" min="5" max="10080" @bind="_form.JobWatchdogTimeoutMinutes" /></label>
                         </div>
@@ -234,13 +287,12 @@
                     </section>
 
                     <section class="panel-card full">
-                        <div class="sub-editor-head">
-                            <h3>Global Skiplist</h3>
+                        <PanelHeader Title="Global Skiplist" SaveLabel="Save settings" OnSave="Save">
                             <button class="secondary slim" @onclick="AddGlobalSkipPattern">
                                 <span class="btn-icon">＋</span>
                                 Add pattern
                             </button>
-                        </div>
+                        </PanelHeader>
                         <p class="hint">Applied before every site skiplist. Plain text matches names/paths; * and ? work as wildcards.</p>
                         <div class="list-grid list-head">
                             <span>Pattern</span>
@@ -261,13 +313,12 @@
                     </section>
 
                     <section class="panel-card full">
-                        <div class="sub-editor-head">
-                            <h3>Global Order List</h3>
+                        <PanelHeader Title="Global Order List" SaveLabel="Save settings" OnSave="Save">
                             <button class="secondary slim" @onclick="AddGlobalOrderPattern">
                                 <span class="btn-icon">＋</span>
                                 Add pattern
                             </button>
-                        </div>
+                        </PanelHeader>
                         <p class="hint">Matched rows transfer first, in this order. Plain text and * / ? wildcards are supported.</p>
                         <div class="order-grid list-head">
                             <span>Pattern</span>
@@ -293,9 +344,7 @@
                     </section>
 
                     <section class="panel-card full">
-                        <div class="sub-editor-head">
-                            <h3>Site Order</h3>
-                            <div class="inline-actions">
+                        <PanelHeader Title="Site Order" SaveLabel="Save settings" OnSave="Save">
                                 <select @bind="_siteOrderCandidate">
                                     <option value="">Select site</option>
                                     @foreach (var site in AvailableOrderSites())
@@ -307,8 +356,7 @@
                                     <span class="btn-icon">＋</span>
                                     Add site
                                 </button>
-                            </div>
-                        </div>
+                        </PanelHeader>
                         <p class="hint">Controls the default order for site dropdowns and site lists. Sites not listed here are shown after these.</p>
                         <div class="order-grid list-head">
                             <span>Site</span>
@@ -338,7 +386,7 @@
             {
                 <div class="panel-grid">
                     <section class="panel-card">
-                        <h3>HTTP / JSON</h3>
+                        <PanelHeader Title="HTTP / JSON" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>HTTP/JSON port<input type="number" @bind="_form.HttpsJsonApiPort" /></label>
                             <label>API listen
@@ -356,18 +404,20 @@
                     </section>
 
                     <section class="panel-card">
-                        <h3>UDP API</h3>
+                        <PanelHeader Title="UDP API" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>UDP API port<input type="number" @bind="_form.UdpApiPort" /></label>
                             <label>UDP mode
                                 <select @bind="_form.UdpApiMode">
+                                    <option value="auto">Auto detect</option>
                                     <option value="plaintext">Plain text</option>
-                                    <option value="json">JSON</option>
+                                    <option value="encrypted">Encrypted</option>
                                 </select>
                             </label>
                             <div class="checks wide">
                                 <label><input type="checkbox" @bind="_form.EnableUdpApi" /> UDP API</label>
                             </div>
+                            <p class="hint wide">Encrypted mode uses the API password and accepts slftp's AES-256-CBC UDP format. Restart WeaveFXP after changing the UDP listener.</p>
                         </div>
                     </section>
                 </div>
@@ -433,6 +483,8 @@
     private List<Site> _sites = new();
     private string _tab = "web";
     private string _apiPassword = "";
+    private string _proxyPassword = "";
+    private string _dataProxyPassword = "";
     private string _siteOrderCandidate = "";
     private bool _folderPickerOpen;
     private string _folderPath = "";
@@ -450,10 +502,14 @@
     private void Save()
     {
         _form.ApiPassword = _apiPassword;
+        _form.ProxyPassword = _proxyPassword;
+        _form.DataProxyPassword = _dataProxyPassword;
         try
         {
             Engine.UpdateSettings(_form);
             _apiPassword = "";
+            _proxyPassword = "";
+            _dataProxyPassword = "";
             _form = Engine.Settings(true);
             _sites = Engine.Sites(true);
             EnsureSiteOrderCandidate();

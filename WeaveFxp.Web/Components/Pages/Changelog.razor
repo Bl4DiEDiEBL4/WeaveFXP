@@ -16,13 +16,59 @@
         <section class="doc-hero">
             <div>
                 <span class="doc-kicker">Current build</span>
-                <h2>v1.0.1</h2>
-                <p>Faster racing, bounded history storage and clearer live transfer diagnostics.</p>
+                <h2>v1.0.2</h2>
+                <p>Faster race starts, fair cross-race scheduling and broader server compatibility.</p>
             </div>
         </section>
 
         <section class="timeline">
             <article class="timeline-item current">
+                <div class="timeline-version">v1.0.2</div>
+                <div class="timeline-date">September 10, 2026</div>
+                <ul>
+                    <li>Use native SITE SEARCH by default. Recursive folder scanning is now explicitly opt-in in the UI and API, unsupported commands do not trigger a crawl, and cancelled searches clear pending work.</li>
+                    <li>Added Site Search with recursive multi-site wildcard/regex matching, exclusions, kind/date/size filters, live results, cancellation and JSON export. Search results can be queued for local download or FXP through the UI or API.</li>
+                    <li>Added Move up/Move down for queued manual transfers and confirmed Remove all in the queue toolbar and context menu, without touching races or transferred files.</li>
+                    <li>Fixed literal HTML entities in the cbftp JSON import placeholder.</li>
+                    <li>Rank transfers across active mesh races through a shared scoreboard, with file priority, measured route speed and rotation between equally scored races; independent site pairs can keep working.</li>
+                    <li>Reserve both mesh transfer slots before opening connections, prevent concurrent claims for the same destination file across races, and remove paused or cancelled work from dispatch.</li>
+                    <li>Share site capacity with newly announced races when they have pending work, while allowing a single race to use every configured transfer slot.</li>
+                    <li>Cache mesh transfer candidates per file, wake waiting mesh workers when shared site slots become available, and give measured route speeds more weight.</li>
+                    <li>Correct mesh worker capacity for asymmetric download/upload limits and keep transfer failures scoped to their source/destination route so another source can take over.</li>
+                    <li>Handle WeaveFTPD in-progress 553/X-DUPE replies as destination occupancy, verify completion through fresh listings, and retry abandoned uploads without repeatedly contesting the same file.</li>
+                    <li>Do not mark mesh files complete after permission refusals, and release each mesh reservation only once when a slot becomes unavailable.</li>
+                    <li>Removed blocking destination setup from the announce path and let the first transfer create its required directory safely.</li>
+                    <li>Kept site sessions warm, paced connection warm-up and corrected poll timing to reduce announce-to-first-STOR latency.</li>
+                    <li>Prioritized hot root listings, refreshed nested directories separately and retried growing or upload-busy source files sooner.</li>
+                    <li>Improved completion detection so releases completed by another racer stop promptly instead of idling for a minute or becoming false failures.</li>
+                    <li>Prevented races from trusting completion/status folders before a visible SFV has been parsed, avoiding false 1/1 completions where only the SFV was seen.</li>
+                    <li>Fixed right-click Remove for completed local/FXP queue rows that were already archived out of the hot job list.</li>
+                    <li>Queued local downloads/uploads per site, routed their worker streams through the shared site slot caps and cancel queued/running local transfers when the site pane disconnects.</li>
+                    <li>Made multi-site mesh scheduling capacity- and route-speed-aware so a saturated third site cannot starve an available faster site pair.</li>
+                    <li>Added global SOCKS5, SOCKS5H and HTTP proxy settings for FTP control and data connections, including authentication and data-route overrides.</li>
+                    <li>Added full cbftp/RaceTrade-compatible site creation and update handling plus direct cbftp Site JSON import in Site Manager.</li>
+                    <li>Added cbftp-style ALL upload/download slots, guarded slot inputs and cbftp-compatible defaults for SSCN, CPSV and XDUPE.</li>
+                    <li>Added slftp encrypted UDP support using AES-256-CBC with PBKDF2-SHA256, plus plaintext and automatic detection modes.</li>
+                    <li>Kept browser selections clearly visible while compare-result colors are active.</li>
+                    <li>Added removable default global skip patterns for <code>.tvmaze</code>, <code>.imdb</code>, <code>file_id.diz</code> and <code>.txt</code>.</li>
+                    <li>Added persistent one-click Circuit, Graphite, Signal, Voltage and Daylight color palettes across the complete web interface.</li>
+                    <li>Added persistent browser Favorites with a dedicated sidebar manager for site, remote path and local path, opening both panes in one click.</li>
+                    <li>Saved each Favorite's preferred local pane side, preserved it when opening, and clarified browser tab status in local/server mode.</li>
+                    <li>Added safe local transfer retries with exact-size skipping for downloads/uploads and FTP REST resume for partial downloads.</li>
+                    <li>Moved local transfer slot caps into Local settings, added ALL to inherit effective Site Manager slots and made logs show the site, local and login caps that determine the final thread count.</li>
+                    <li>Added live zipscript-style local SFV folder banners during downloads, followed by CRC32 verification with WFXP-style COMPLETE folders and per-file .missing markers.</li>
+                    <li>Accelerated local SFV verification by calculating CRC32 during fresh downloads and reusing those values during the final SFV check.</li>
+                    <li>Refreshed affected local browser panes live during downloads so new files and growing sizes appear without a manual refresh.</li>
+                    <li>Improved Daylight contrast across dashboard activity, site balance, Favorites, context menus, queue details and browser logs.</li>
+                    <li>Kept local downloads within the shared site login limit and hardened FTPS login against deferred protection replies from non-standard servers.</li>
+                    <li>Coalesced live UI refreshes across concurrent jobs and removed the admin-only Windows Event Log dependency to keep buttons and pages responsive.</li>
+                    <li>Started the packaged Windows console hidden, added a Show/Hide tray command and disabled its close button so only explicit tray actions stop WeaveFXP.</li>
+                    <li>Added a Settings toggle for whether the web UI opens automatically at executable launch; it remains enabled by default.</li>
+                    <li>Added local Save buttons to editable Settings and Site Manager panels so changes can be saved from the card being edited.</li>
+                </ul>
+            </article>
+
+            <article class="timeline-item">
                 <div class="timeline-version">v1.0.1</div>
                 <div class="timeline-date">August 2026</div>
                 <ul>

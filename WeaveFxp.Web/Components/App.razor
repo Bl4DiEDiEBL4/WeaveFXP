@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" data-palette="circuit">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,7 +8,7 @@
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
     <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
     <link rel="apple-touch-icon" href="icon-192.png" />
-    <link rel="stylesheet" href="app.css?v=responsive" />
+    <link rel="stylesheet" href="app.css?v=daylight" />
     <HeadOutlet @rendermode="InteractiveServer" />
 </head>
 <body>
@@ -17,6 +17,33 @@
     <Routes @rendermode="InteractiveServer" />
     <script>
         window.weaveFxp = window.weaveFxp || {};
+        window.weaveFxp.downloadJson = function (name, text) {
+            const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = name;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        };
+        window.weaveFxp.palettes = ["circuit", "graphite", "signal", "voltage", "daylight"];
+        window.weaveFxp.getPalette = function () {
+            const saved = localStorage.getItem("weavefxp.palette");
+            return window.weaveFxp.palettes.includes(saved) ? saved : "circuit";
+        };
+        window.weaveFxp.setPalette = function (palette) {
+            const selected = window.weaveFxp.palettes.includes(palette) ? palette : "circuit";
+            document.documentElement.dataset.palette = selected;
+            document.documentElement.dataset.theme = selected === "daylight" ? "light" : "dark";
+            localStorage.setItem("weavefxp.palette", selected);
+            return selected;
+        };
+        window.weaveFxp.setPalette(window.weaveFxp.getPalette());
+        window.weaveFxp.scrollLogsToBottom = function (root) {
+            if (!root || !root.querySelectorAll) return;
+            root.querySelectorAll(".logview,.events").forEach(function (element) {
+                element.scrollTop = element.scrollHeight;
+            });
+        };
         window.weaveFxp.startSplitDrag = function (root, dotnet, tabId, startX) {
             const browsers = root && root.querySelector ? root.querySelector(".browsers") : null;
             if (!browsers) return;

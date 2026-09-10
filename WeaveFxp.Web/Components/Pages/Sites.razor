@@ -11,6 +11,10 @@
             <p class="page-sub">@LoadedLabel()</p>
         </div>
         <div class="page-actions">
+            <button class="secondary" @onclick="OpenCbftpImport">
+                <span class="btn-icon">⇩</span>
+                Import cbftp
+            </button>
             <button class="secondary" @onclick="Reload">
                 <span class="btn-icon">↻</span>
                 Load sites
@@ -84,7 +88,7 @@
                 {
                     <div class="panel-grid">
                         <section class="panel-card">
-                            <h3>Basic</h3>
+                            <PanelHeader Title="Basic" SaveLabel="Save site" OnSave="Save" />
                             <div class="form-grid">
                                 <label>Name<input @bind="_form.Name" /></label>
                                 <label>Host<input @bind="_form.Host" /></label>
@@ -103,14 +107,31 @@
                         </section>
 
                         <section class="panel-card">
-                            <h3>Limits</h3>
+                            <PanelHeader Title="Limits" SaveLabel="Save site" OnSave="Save" />
                             <div class="form-grid">
-                                <label>Login slots<input type="number" @bind="_form.LoginSlots" /></label>
-                                <label>Upload slots<input type="number" @bind="_form.UploadSlots" /></label>
-                                <label>Download slots<input type="number" @bind="_form.DownloadSlots" /></label>
-                                <label>Max idle (s)<input type="number" @bind="_form.MaxIdleSeconds" /></label>
-                                <label>Timeout (s)<input type="number" @bind="_form.TimeoutSeconds" /></label>
+                                <label>Login slots<input type="number" min="0" max="40" @bind="_form.LoginSlots" placeholder="0 = automatic" /></label>
+                                <label>Upload slots
+                                    <select @bind="_form.UploadSlots">
+                                        <option value="0">ALL</option>
+                                        @foreach (var slot in SlotOptions(_form.UploadSlots))
+                                        {
+                                            <option value="@slot">@slot</option>
+                                        }
+                                    </select>
+                                </label>
+                                <label>Download slots
+                                    <select @bind="_form.DownloadSlots">
+                                        <option value="0">ALL</option>
+                                        @foreach (var slot in SlotOptions(_form.DownloadSlots))
+                                        {
+                                            <option value="@slot">@slot</option>
+                                        }
+                                    </select>
+                                </label>
+                                <label>Max idle (s)<input type="number" min="0" @bind="_form.MaxIdleSeconds" /></label>
+                                <label>Timeout (s)<input type="number" min="1" @bind="_form.TimeoutSeconds" /></label>
                             </div>
+                            <p class="fh">@EffectiveSlotSummary()</p>
                         </section>
                     </div>
                 }
@@ -118,7 +139,7 @@
                 {
                     <div class="panel-grid">
                         <section class="panel-card">
-                            <h3>Protocol</h3>
+                            <PanelHeader Title="Protocol" SaveLabel="Save site" OnSave="Save" />
                             <div class="form-grid">
                                 <label>FXP mode
                                     <select @bind="_form.FxpMode">
@@ -160,7 +181,7 @@
                         </section>
 
                         <section class="panel-card">
-                            <h3>Flags</h3>
+                            <PanelHeader Title="Flags" SaveLabel="Save site" OnSave="Save" />
                             <div class="checks cards-checks">
                                 <label><input type="checkbox" @bind="_form.UsePret" /> PRET</label>
                                 <label><input type="checkbox" @bind="_form.UseEpsv" /> EPSV</label>
@@ -177,7 +198,7 @@
                         </section>
 
                         <section class="panel-card">
-                            <h3>Race routing</h3>
+                            <PanelHeader Title="Race routing" SaveLabel="Save site" OnSave="Save" />
                             <div class="checks cards-checks">
                                 <label><input type="checkbox" @bind="_form.BlockTransferTo" /> Never use this site as destination</label>
                                 <label><input type="checkbox" @bind="_form.BlockTransferFrom" /> Never use this site as source</label>
@@ -231,13 +252,12 @@
                         </section>
 
                         <section class="panel-card">
-                            <div class="sub-editor-head">
-                                <h3>Completion</h3>
+                            <PanelHeader Title="Completion" SaveLabel="Save site" OnSave="Save">
                                 <button class="secondary slim" @onclick="AddCompleteMarker">
                                     <span class="btn-icon">＋</span>
                                     Add marker
                                 </button>
-                            </div>
+                            </PanelHeader>
                             <p class="hint">SFV is checked automatically when it is readable. These markers are still needed as the site-specific fallback/stop signal for releases without a usable SFV, server-made COMPLETE folders and custom status folders. Plain markers match as words; use * and ? for custom patterns.</p>
                             <div class="list-grid list-head">
                                 <span>Marker</span>
@@ -261,13 +281,12 @@
                 else if (_tab == "affils")
                 {
                     <section class="panel-card full">
-                        <div class="sub-editor-head">
-                            <h3>Groups / Affils</h3>
+                        <PanelHeader Title="Groups / Affils" SaveLabel="Save site" OnSave="Save">
                             <button class="secondary slim" @onclick="AddAffil">
                                 <span class="btn-icon">＋</span>
                                 Add group
                             </button>
-                        </div>
+                        </PanelHeader>
                         <div class="list-grid list-head">
                             <span>Group</span>
                             <span></span>
@@ -289,13 +308,12 @@
                 else if (_tab == "sections")
                 {
                     <section class="panel-card full">
-                        <div class="sub-editor-head">
-                            <h3>Sections</h3>
+                        <PanelHeader Title="Sections" SaveLabel="Save site" OnSave="Save">
                             <button class="secondary slim" @onclick="AddSection">
                                 <span class="btn-icon">＋</span>
                                 Add section
                             </button>
-                        </div>
+                        </PanelHeader>
                         <div class="section-grid section-head">
                             <span>Name</span>
                             <span>Section</span>
@@ -318,13 +336,12 @@
                 else
                 {
                     <section class="panel-card full">
-                        <div class="sub-editor-head">
-                            <h3>Skiplist</h3>
+                        <PanelHeader Title="Skiplist" SaveLabel="Save site" OnSave="Save">
                             <button class="secondary slim" @onclick="AddSkipPattern">
                                 <span class="btn-icon">＋</span>
                                 Add pattern
                             </button>
-                        </div>
+                        </PanelHeader>
                         <p class="hint">Plain text matches anywhere in the name or path. Use * and ? for wildcard patterns.</p>
                         <div class="list-grid list-head">
                             <span>Pattern</span>
@@ -354,6 +371,27 @@
     </div>
 </div>
 
+@if (_importOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseCbftpImport"></div>
+    <section class="modal site-import-modal" role="dialog" aria-modal="true" aria-labelledby="cbftp-import-title">
+        <header>
+            <div>
+                <h3 id="cbftp-import-title">Import cbftp Site JSON</h3>
+                <div class="viewer-meta">Paste one site object or an array returned by the cbftp site API.</div>
+            </div>
+            <button class="secondary icon-btn" title="Close" @onclick="CloseCbftpImport">×</button>
+        </header>
+        <div class="form-grid">
+            <label class="wide">Site JSON<textarea @bind="_importJson" @bind:event="oninput" spellcheck="false" placeholder="@ImportJsonPlaceholder"></textarea></label>
+        </div>
+        <div class="modal-actions">
+            <button disabled="@(string.IsNullOrWhiteSpace(_importJson))" @onclick="ImportCbftp">Import site</button>
+            <button class="secondary" @onclick="CloseCbftpImport">Cancel</button>
+        </div>
+    </section>
+}
+
 @if (_toast is not null)
 {
     <div class="toast show" @key="_toast">@_toast</div>
@@ -369,6 +407,9 @@
     private string _tab = "basic";
     private string? _probeResult;
     private string? _toast;
+    private bool _importOpen;
+    private string _importJson = "";
+    private const string ImportJsonPlaceholder = """{ "name": "SITE", "addresses": [ "host:21" ] }""";
 
     protected override void OnInitialized()
     {
@@ -391,8 +432,13 @@
             Username = "anonymous",
             BasePath = "/",
             ListCommand = "STAT -l",
-            LoginSlots = 1,
-            DownloadSlots = 1,
+            LoginSlots = 0,
+            UploadSlots = 0,
+            DownloadSlots = 0,
+            TlsMode = TlsMode.Explicit,
+            SscnSupported = true,
+            CpsvSupported = true,
+            UseXdupe = true,
             XdupeMode = 3,
             MaxIdleSeconds = 30,
             TimeoutSeconds = 30,
@@ -446,6 +492,34 @@
         Toast("Sites loaded");
     }
 
+    private void OpenCbftpImport()
+    {
+        _importJson = "";
+        _importOpen = true;
+    }
+
+    private void CloseCbftpImport() => _importOpen = false;
+
+    private void ImportCbftp()
+    {
+        try
+        {
+            var imported = CbftpSiteImporter.Parse(_importJson);
+            foreach (var site in imported)
+            {
+                site.Validate();
+                if (_sites.Any(existing => existing.Name.Equals(site.Name, StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidOperationException($"Site '{site.Name}' already exists; rename or delete it first");
+            }
+            foreach (var site in imported) Engine.AddSite(site);
+            _sites = Engine.Sites(true);
+            _importOpen = false;
+            EditSite(imported[0].Name);
+            Toast($"Imported {imported.Count} cbftp site{(imported.Count == 1 ? "" : "s")}");
+        }
+        catch (Exception ex) { Toast("Import failed: " + ex.Message); }
+    }
+
     private void SelectExisting(ChangeEventArgs e)
     {
         var name = e.Value?.ToString() ?? "";
@@ -465,6 +539,26 @@
 
     private IEnumerable<string> OtherSiteNames() =>
         _sites.Select(s => s.Name).Where(n => !n.Equals(_form.Name, StringComparison.OrdinalIgnoreCase));
+
+    private IEnumerable<int> SlotOptions(int current)
+    {
+        var max = Math.Clamp(Math.Max(Math.Max(1, _form.LoginSlots), current), 1, 40);
+        return Enumerable.Range(1, max);
+    }
+
+    private string EffectiveSlotSummary()
+    {
+        var login = _form.LoginSlots > 0 ? _form.LoginSlots.ToString() : "automatic";
+        return $"Effective site slots: {EffectiveSiteSlots(_form.DownloadSlots)} download / {EffectiveSiteSlots(_form.UploadSlots)} upload; login slots ({login}) caps both.";
+    }
+
+    private int EffectiveSiteSlots(int configured)
+    {
+        var loginLimit = _form.LoginSlots > 0 ? _form.LoginSlots : 30;
+        return configured <= 0
+            ? Math.Clamp(loginLimit, 1, 30)
+            : Math.Clamp(Math.Min(configured, loginLimit), 1, 30);
+    }
 
     private bool IsTargetBlocked(string other) => !_form.IsAllowedTargetSite(other);
 
@@ -511,6 +605,9 @@
     private void Save()
     {
         ApplyListCommand();
+        _form.LoginSlots = Math.Max(0, _form.LoginSlots);
+        _form.UploadSlots = Math.Max(0, _form.UploadSlots);
+        _form.DownloadSlots = Math.Max(0, _form.DownloadSlots);
         _form.Password = _password;
         _form.CompleteMarkers = NormalizeList(_form.CompleteMarkers);
         _form.Affils = NormalizeList(_form.Affils);

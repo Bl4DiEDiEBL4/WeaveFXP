@@ -68,6 +68,21 @@
             new ApiExample("History", "Read transfer jobs and release checks.", "GET",
                 $"{CurlPrefix}{AuthHeader} {BaseUrl}/api/jobs\n{CurlPrefix}{AuthHeader} {BaseUrl}/api/releases"),
         }),
+        new ApiGroup("Site Search", new[]
+        {
+            new ApiExample("Server search", "Default: sends SITE SEARCH to each selected site. No recursive fallback if unsupported. Search syntax and available directory results are server-dependent.", "POST",
+                "POST /api/searches\n" + """{ "sites": ["SITE_A"], "include": "Release.Name", "recursive": false }"""),
+            new ApiExample("Recursive scan", "Opt-in client-side crawl with wildcard/regex patterns, exclusions, kind, depth, dates and byte-size limits.", "POST",
+                "POST /api/searches\n" + """{ "sites": ["SITE_A"], "paths": ["/SECTION"], "include": "*.sfv;*.nfo", "exclude": "*sample*", "recursive": true, "regex": false, "kind": "both", "max_depth": 4, "max_results": 1000 }"""),
+            new ApiExample("Progress and results", "Poll paginated results. Status distinguishes completed, partial, limited, cancelled and failed searches. Searches remain in memory until evicted or restarted.", "GET",
+                $"{CurlPrefix}{AuthHeader} \"{BaseUrl}/api/searches/SEARCH_ID?offset=0&limit=100\""),
+            new ApiExample("Stop or export", "Stop a search without discarding its partial results, or export all collected results as JSON.", "POST / GET",
+                $"POST {BaseUrl}/api/searches/SEARCH_ID/cancel\nGET {BaseUrl}/api/searches/SEARCH_ID/export"),
+            new ApiExample("Queue results", "Select result IDs for local download or FXP. Searching alone does not transfer files.", "POST",
+                "POST /api/searches/SEARCH_ID/queue\n" + """{ "result_ids": [0, 3], "destination_site": "local", "destination_path": "" }"""),
+            new ApiExample("Manual queue", "Move a pending job one position up (-1) or down (1). Bulk removal stops and removes manual jobs, leaving races and transferred files intact.", "POST / DELETE",
+                $"POST {BaseUrl}/api/jobs/JOB_ID/move/-1\nPOST {BaseUrl}/api/jobs/JOB_ID/move/1\nDELETE {BaseUrl}/api/jobs/manual"),
+        }),
         new ApiGroup("Transfers", new[]
         {
             new ApiExample("Start FXP", "Start a site-to-site transfer.", "POST",

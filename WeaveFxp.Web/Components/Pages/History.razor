@@ -70,7 +70,7 @@
                             <td>@job.Type</td>
                             <td class="strong" title="@ReleaseName(job)">@ReleaseName(job)</td>
                             <td class="mono" title="@SectionNames(job)">@SectionNames(job)</td>
-                            <td class="strong">@job.Request.FromSite → @job.Request.ToSite</td>
+                            <td class="strong" title="@RouteSites(job)">@DisplayRoute(job)</td>
                             <td class="mono" title="@job.Request.SourcePath">@job.Request.SourcePath</td>
                             <td class="mono" title="@job.Request.DestPath">@job.Request.DestPath</td>
                             <td class="dim" title="@JobDetail(job)">@JobDetail(job)</td>
@@ -92,7 +92,7 @@
 
     private IEnumerable<Job> FilteredJobs => _jobs
         .Where(j => string.IsNullOrEmpty(_state) || j.State.ToString() == _state)
-        .Where(j => Matches($"{j.Request.FromSite} {j.Request.ToSite} {j.Request.SourcePath} {j.Request.DestPath} {ReleaseName(j)} {SectionNames(j)} {j.Error}"));
+        .Where(j => Matches($"{j.Request.FromSite} {j.Request.ToSite} {string.Join(' ', j.Request.MeshSites)} {j.Request.SourcePath} {j.Request.DestPath} {ReleaseName(j)} {SectionNames(j)} {j.Error}"));
 
     private IEnumerable<Job> PagedJobs => FilteredJobs.Take(_pageSize);
     private string PageLabel => $"{FilteredJobs.Count()} transfer row(s)";
@@ -138,9 +138,20 @@
     private string SectionNames(Job job)
     {
         var src = SectionNameFor(job.Request.FromSite, ParentPath(job.Request.SourcePath));
-        var dst = SectionNameFor(job.Request.ToSite, ParentPath(job.Request.DestPath));
+        var destinationSite = job.Request.MeshSites.Count > 1
+            ? job.Request.MeshSites.FirstOrDefault(s => !s.Equals(job.Request.FromSite, StringComparison.OrdinalIgnoreCase)) ?? job.Request.FromSite
+            : job.Request.ToSite;
+        var dst = SectionNameFor(destinationSite, ParentPath(job.Request.DestPath));
         return src.Equals(dst, StringComparison.OrdinalIgnoreCase) ? src : $"{src} → {dst}";
     }
+
+    private static string DisplayRoute(Job job) => job.Request.MeshSites.Count > 1
+        ? "Mesh"
+        : $"{job.Request.FromSite} → {job.Request.ToSite}";
+
+    private static string RouteSites(Job job) => job.Request.MeshSites.Count > 1
+        ? string.Join(" ↔ ", job.Request.MeshSites)
+        : $"{job.Request.FromSite} → {job.Request.ToSite}";
 
     private string SectionNameFor(string site, string path)
     {

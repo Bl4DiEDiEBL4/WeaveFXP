@@ -19,7 +19,8 @@
         }
         else
         {
-            <button class="secondary slim" title="Connect browse" @onclick="() => OnConnect.InvokeAsync()">
+            <button class="secondary slim" title="@(CanConnect ? "Connect browse" : "Select a site first")"
+                    disabled="@(!CanConnect)" @onclick="() => OnConnect.InvokeAsync()">
                 <span class="btn-icon">▶</span>
                 Connect
             </button>
@@ -157,6 +158,7 @@
     private Task OnSectionChange(ChangeEventArgs e) => OnSectionSelected.InvokeAsync(e.Value?.ToString() ?? "");
     private Task OnPathChange(ChangeEventArgs e) => OnPathChanged.InvokeAsync(e.Value?.ToString() ?? "/");
     private bool IsLocal => Pane.Site.Equals("local", StringComparison.OrdinalIgnoreCase);
+    private bool CanConnect => !string.IsNullOrWhiteSpace(Pane.Site);
     private bool ShowParent => !(IsLocal && string.IsNullOrWhiteSpace(Pane.Path)) && Pane.Path != "/";
 
     private IEnumerable<(string Label, string Value)> NavOptions()
