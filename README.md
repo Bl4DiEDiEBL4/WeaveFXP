@@ -160,7 +160,7 @@ set WEAVEFXP_STATE=D:\WeaveFXP\data\state.json
 - Added Favorites with preserved pane positions, local ALL slot settings, panel Save buttons and a browser-at-startup toggle enabled by default.
 - Added cbftp JSON import, slftp encrypted UDP compatibility and persistent UI palettes.
 
-See the [full v1.0.2 release notes](docs/releases/v1.0.2.md), including upgrade instructions and validation limits. The regression runner currently passes 124 checks; throughput parity with cbftp has not been benchmarked.
+See the [full v1.0.2 release notes](docs/releases/v1.0.2.md) for new features and fixes.
 
 ### v1.0.1
 
