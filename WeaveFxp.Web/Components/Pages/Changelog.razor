@@ -16,13 +16,27 @@
         <section class="doc-hero">
             <div>
                 <span class="doc-kicker">Current build</span>
-                <h2>v1.0.2</h2>
-                <p>Faster race starts, fair cross-race scheduling and broader server compatibility.</p>
+                <h2>v1.0.3</h2>
+                <p>Upload, browser refresh and race repair fixes, plus configurable history retention.</p>
             </div>
         </section>
 
         <section class="timeline">
             <article class="timeline-item current">
+                <div class="timeline-version">v1.0.3</div>
+                <div class="timeline-date">October 20, 2026</div>
+                <ul>
+                    <li>Fixed FTP/FTPS uploads failing with receive idle timeouts.</li>
+                    <li>Fixed browser refresh flashing and losing selections during transfers.</li>
+                    <li>Queued manual transfers now wait for Start instead of starting immediately.</li>
+                    <li>Races and mesh transfers retry missing or size-changed files, including with destination precheck disabled.</li>
+                    <li>Fixed false race completion and duplicate retries caused by stale or failed directory listings.</li>
+                    <li>Virtual completion/status folders are no longer scanned as release directories.</li>
+                    <li>Added a configurable history limit, defaulting to 1,000 finished jobs. Older entries are removed; running and queued jobs are preserved.</li>
+                </ul>
+            </article>
+
+            <article class="timeline-item">
                 <div class="timeline-version">v1.0.2</div>
                 <div class="timeline-date">September 10, 2026</div>
                 <ul>

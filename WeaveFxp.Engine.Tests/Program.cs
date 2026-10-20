@@ -5,6 +5,16 @@ using WeaveFxp.Engine.Core;
 using WeaveFxp.Engine.Ftp;
 
 var passed = 0;
+if (args.Contains("--race-repair-tests"))
+{
+    await RaceRepairTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--history-retention-tests"))
+{
+    HistoryRetentionTests.Run();
+    return;
+}
 if (args.Contains("--search-fixture"))
 {
     await using var fixture = SiteSearchTests.Fixture();
@@ -20,6 +30,8 @@ void Check(bool value, string name)
     Console.WriteLine("PASS: " + name);
     passed++;
 }
+
+HistoryRetentionTests.Run();
 
 var busy = new IOException("553 file.r00: file is being uploaded by another user");
 Check(FxpTransfer.IsDestinationBusyError(busy), "WeaveFTPD 553 collision is destination occupancy");
@@ -144,8 +156,10 @@ Check(pairSource.CanBorrowTransfer("next", true), "returned client restores hand
 await pairSource.SweepAsync(TimeSpan.FromSeconds(-1), TimeSpan.Zero);
 GlobalScoreboardTests.Run(Check);
 await ManualQueueTests.Run(Check);
+await UploadTests.Run(Check);
 await SiteSearchTests.Run(Check);
 await MeshIntegration.Run(Check);
+await RaceRepairTests.Run(Check);
 Console.WriteLine($"{passed} regression checks passed.");
 
 sealed class LoginServer : IAsyncDisposable

@@ -97,6 +97,8 @@ public sealed class AppSettings
     public int MaxConcurrentFxpJobs { get; set; } = 2;
     public int MaxConcurrentRaceJobs { get; set; } = 2;
     public int StoredJobHistoryLimit { get; set; } = 150;
+    // Total completed history across the hot JSON set and SQLite archive.
+    public int CompletedJobHistoryLimit { get; set; } = 1000;
     // Race loop: how often to re-list the source for new files, and how many
     // consecutive no-new-file cycles to allow before giving up.
     // Verbose FTP protocol logging (every command/response into the FTP Log). Costs
@@ -156,6 +158,7 @@ public sealed class AppSettings
         if (MaxConcurrentRaceJobs == 0) MaxConcurrentRaceJobs = 2;
         if (StoredJobHistoryLimit == 0) StoredJobHistoryLimit = 150;
         StoredJobHistoryLimit = Math.Clamp(StoredJobHistoryLimit, 25, 150);
+        CompletedJobHistoryLimit = Math.Clamp(CompletedJobHistoryLimit, 1, 100000);
         LocalDownloadSlots = Math.Clamp(LocalDownloadSlots, 0, 64);
         LocalUploadSlots = Math.Clamp(LocalUploadSlots, 0, 64);
         BrowserFavorites = (BrowserFavorites ?? new List<BrowserFavorite>())

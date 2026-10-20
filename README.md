@@ -1,4 +1,4 @@
-# WeaveFXP v1.0.2
+# WeaveFXP v1.0.3
 
 WeaveFXP is a self-hosted FXP client with a dark web UI, a headless transfer
 engine and a JSON API. It is built for site-to-site racing, manual browsing and
@@ -17,9 +17,9 @@ engine runs in the same process.
 
 Choose the release for your machine:
 
-- Windows: `WeaveFXP-v1.0.2-win-x64.zip`
-- Linux PC/server: `WeaveFXP-v1.0.2-linux-x64.zip`
-- Linux ARM64: `WeaveFXP-v1.0.2-linux-arm64.zip`
+- Windows: `WeaveFXP-v1.0.3-win-x64.zip`
+- Linux PC/server: `WeaveFXP-v1.0.3-linux-x64.zip`
+- Linux ARM64: `WeaveFXP-v1.0.3-linux-arm64.zip`
 
 1. Download the release for your platform.
 2. Extract the executable into its own folder, for example `D:\WeaveFXP`.
@@ -118,9 +118,9 @@ The publish scripts create:
 Release\win-x64\WeaveFXP.exe
 Release\linux-x64\WeaveFXP
 Release\linux-arm64\WeaveFXP
-Release\zips\WeaveFXP-v1.0.2-win-x64.zip
-Release\zips\WeaveFXP-v1.0.2-linux-x64.zip
-Release\zips\WeaveFXP-v1.0.2-linux-arm64.zip
+Release\zips\WeaveFXP-v1.0.3-win-x64.zip
+Release\zips\WeaveFXP-v1.0.3-linux-x64.zip
+Release\zips\WeaveFXP-v1.0.3-linux-arm64.zip
 ```
 
 Ship the zip for the target platform. Runtime `data` is not included in release
@@ -141,6 +141,16 @@ set WEAVEFXP_STATE=D:\WeaveFXP\data\state.json
 ```
 
 ## Changelog
+
+### v1.0.3 - 2026-10-20
+
+- Fixed FTP/FTPS uploads failing with receive idle timeouts.
+- Fixed browser refresh flashing and losing selections during transfers.
+- Queued manual transfers now wait for Start instead of starting immediately.
+- Races and mesh transfers retry missing or size-changed files, including with destination precheck disabled.
+- Fixed false race completion and duplicate retries caused by stale or failed directory listings.
+- Virtual completion/status folders are no longer scanned as release directories.
+- Added a configurable history limit, defaulting to 1,000 finished jobs. Older entries are removed; running and queued jobs are preserved.
 
 ### v1.0.2 - 2026-09-10
 

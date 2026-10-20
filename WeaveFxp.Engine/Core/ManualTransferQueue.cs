@@ -9,6 +9,7 @@ internal sealed class ManualTransferQueue
         public required string Id;
         public required Limit[] Limits;
         public required CancellationToken Token;
+        public bool Paused;
         public readonly TaskCompletionSource<IDisposable> Ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
@@ -25,8 +26,11 @@ internal sealed class ManualTransferQueue
 
     // Enqueue synchronously, before Task.Run, so thread-pool timing cannot reorder jobs.
     public Task<IDisposable> Enqueue(string id, CancellationToken token, params Limit[] limits)
+        => Enqueue(id, token, false, limits);
+
+    public Task<IDisposable> Enqueue(string id, CancellationToken token, bool paused, params Limit[] limits)
     {
-        var entry = new Entry { Id = id, Token = token, Limits = limits };
+        var entry = new Entry { Id = id, Token = token, Limits = limits, Paused = paused };
         lock (_sync)
         {
             _pending.Add(entry);
@@ -53,6 +57,17 @@ internal sealed class ManualTransferQueue
         lock (_sync)
             return _pending.Select((entry, index) => (entry.Id, index))
                 .ToDictionary(x => x.Id, x => x.index, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public void SetPaused(string id, bool paused)
+    {
+        lock (_sync)
+        {
+            var entry = _pending.Find(x => x.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+            if (entry is null) return;
+            entry.Paused = paused;
+            Dispatch();
+        }
     }
 
     public bool CanMove(string id, int direction)
@@ -104,7 +119,7 @@ internal sealed class ManualTransferQueue
                 entry.Ready.TrySetCanceled(entry.Token);
                 continue;
             }
-            if (entry.Limits.Any(limit => _active.GetValueOrDefault(limit.Key) >= Math.Max(1, limit.Capacity)))
+            if (entry.Paused || entry.Limits.Any(limit => _active.GetValueOrDefault(limit.Key) >= Math.Max(1, limit.Capacity)))
             {
                 i++;
                 continue;

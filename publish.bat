@@ -22,7 +22,7 @@ set "OUT=%ROOT%Release"
 set "ZIPOUT=%OUT%\zips"
 set "WORK=%TEMP%\WeaveFXP-publish-%RANDOM%-%RANDOM%"
 set "PROJ=%ROOT%WeaveFxp.Web\WeaveFxp.Web.csproj"
-set "VERSION=1.0.2"
+set "VERSION=1.0.3"
 set "LEGACY_DATA=%OUT%\data"
 set "LEGACY_DATA_SEED=%WORK%\legacy-data"
 
@@ -73,7 +73,7 @@ echo.
 echo === Restoring ===
 dotnet restore "%PROJ%" || goto fail
 
-for /f "usebackq delims=" %%V in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[xml]$p=Get-Content '%PROJ%'; $v=$p.Project.PropertyGroup.Version | Select-Object -First 1; if ($v) { $v } else { '1.0.2' }"`) do set "VERSION=%%V"
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "[xml]$p=Get-Content '%PROJ%'; $v=$p.Project.PropertyGroup.Version | Select-Object -First 1; if ($v) { $v } else { '1.0.3' }"`) do set "VERSION=%%V"
 
 if "%~1"=="" (
     set "RIDS=win-x64 linux-x64 linux-arm64"

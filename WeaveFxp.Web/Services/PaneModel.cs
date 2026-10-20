@@ -13,6 +13,8 @@ public sealed class PaneModel
     public HashSet<int> Selected { get; set; } = new();
     public bool Loaded { get; set; }
     public bool Loading { get; set; }
+    public bool Refreshing { get; set; }
+    public long ListingVersion { get; set; }
     public string Status { get; set; } = "Idle";
     public string? Error { get; set; }
     public string SortColumn { get; set; } = "name";

@@ -183,7 +183,7 @@ public sealed partial class WeaveEngine
             var version = Assembly.GetExecutingAssembly()
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
                 ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
-                ?? "1.0.2";
+                ?? "1.0.3";
             var metadata = version.IndexOf('+');
             return metadata < 0 ? version : version[..metadata];
         }
@@ -945,12 +945,13 @@ public sealed partial class WeaveEngine
 
     // ---- FXP jobs ---------------------------------------------------------------------
 
-    public Job StartFxp(TransferRequest req)
+    public Job StartFxp(TransferRequest req, bool queueOnly = false)
     {
         var job = CreateTransferJob(req);
         var run = RegisterJobToken(job.Id);
+        if (queueOnly) PauseJob(job.Id);
         _ = ScheduleTransfer(job.Id, req, run);
-        return job;
+        return _store.Job(job.Id)!;
     }
 
     public SpreadResult StartSpread(SpreadRequest req)
@@ -1259,13 +1260,14 @@ public sealed partial class WeaveEngine
         public required SitePool Pool { get; init; }
         public required List<string> Skiplist { get; init; }
         public Dictionary<string, RaceFile> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
-        // Files known to be present/complete on this site regardless of listed size —
-        // set on a successful transfer here or when an X-DUPE refusal proves it exists.
+        // Recent successful transfers protect against an overlapping older LIST.
+        // They never bypass the current listed size or a later missing-file result.
         public HashSet<string> Confirmed { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, MeshPendingDupe> PendingDupes { get; } = new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> MadeDirs { get; } = new(StringComparer.OrdinalIgnoreCase);
         public SemaphoreSlim DirSem { get; } = new(1, 1);
         public bool Listed { get; set; }
+        public long ListVersion { get; set; } = -1;
         public bool CompletionSeen { get; set; }
     }
 
@@ -1390,6 +1392,7 @@ public sealed partial class WeaveEngine
                 foreach (var c in contexts) c.Pool.SetMeshDemand(id, false, false);
             });
             var raceDone = 0; // 0 running, 1 complete, 2 stopped idle
+            long evidenceVersion = 0;
             var idleCycles = 0;
             DateTime? idleSince = null;
             var idleTimeout = RaceIdleTimeout(maxIdle, pollMs);
@@ -1422,9 +1425,8 @@ public sealed partial class WeaveEngine
             bool HasComplete(MeshSiteCtx site, string rel, long sourceSize)
             {
                 if (site.PendingDupes.ContainsKey(rel)) return false;
-                if (site.Confirmed.Contains(rel)) return true; // transferred here / proven by X-DUPE
                 if (!site.Files.TryGetValue(rel, out var f)) return false;
-                return f.Size > 0 && (sourceSize <= 0 || f.Size >= sourceSize);
+                return f.Size > 0 && (sourceSize <= 0 || f.Size == sourceSize);
             }
 
             async Task ReadAndParseSfvAsync(MeshSiteCtx ctx, RaceFile sfvFile, string readKey)
@@ -1466,6 +1468,7 @@ public sealed partial class WeaveEngine
                             var rel = string.IsNullOrEmpty(sfvFile.ParentRel) ? file.Name : sfvFile.ParentRel + "/" + file.Name;
                             if (expectedFromSfv.Add(rel)) added++;
                         }
+                        evidenceVersion++;
                     }
                     parsedSfvSizes[sfvFile.Rel] = sfvFile.Size;
                     if (added > 0)
@@ -1685,6 +1688,7 @@ public sealed partial class WeaveEngine
                         FtpClient.JoinRemote(pick.Dst.Path, pick.File.Rel),
                         pick.File.Rel, pick.File.Name, pick.File.ParentRel, pick.File.Size);
                     pick.Dst.Confirmed.Add(pick.File.Rel);
+                    evidenceVersion++;
                     pick.Dst.PendingDupes.Remove(pick.File.Rel);
                     dirtyFiles.Add(pick.File.Rel);
                 }
@@ -1721,11 +1725,13 @@ public sealed partial class WeaveEngine
                     {
                         conn = await ctx.Pool.BorrowAsync(ct).ConfigureAwait(false);
                         var listingStarted = DateTime.UtcNow;
+                        long listingVersion;
+                        lock (sync) listingVersion = evidenceVersion;
                         var listTimer = System.Diagnostics.Stopwatch.StartNew();
                         var sawCompletion = false;
                         var files = await ListSourceFilesAsync(conn, ctx.Path, ctx.Skiplist, ct,
                             completeMarkers: CompleteMarkersFor(ctx.Site),
-                            onCompletionMarker: _ => sawCompletion = true, throwOnRootFailure: true).ConfigureAwait(false);
+                            onCompletionMarker: _ => sawCompletion = true, throwOnAnyFailure: true).ConfigureAwait(false);
                         ctx.Pool.Return(conn);
                         conn = null;
                         listFails = 0;
@@ -1733,24 +1739,49 @@ public sealed partial class WeaveEngine
                         {
                             if (!ctx.Listed) dirtyFiles.UnionWith(knownSizes.Keys);
                             ctx.Listed = true;
-                            if (sawCompletion) ctx.CompletionSeen = true;
+                            ctx.CompletionSeen = sawCompletion;
+                            var present = files.Select(f => f.Rel).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                            foreach (var rel in ctx.Files.Keys.ToList())
+                            {
+                                if (listingVersion != evidenceVersion || present.Contains(rel) || inFlight.Contains(rel + "|" + ctx.Name)) continue;
+                                ctx.Files.Remove(rel);
+                                ctx.Confirmed.Remove(rel);
+                                dirtyFiles.Add(rel);
+                                added++;
+                            }
                             foreach (var f in files)
                             {
-                                knownSizes.AddOrUpdate(f.Rel, Math.Max(0, f.Size), (_, old) => Math.Max(old, Math.Max(0, f.Size)));
+                                if (inFlight.Contains(f.Rel + "|" + ctx.Name)) continue;
+                                // A transfer finishing while LIST was in progress wins
+                                // over that older snapshot until the next listing.
+                                if (listingVersion != evidenceVersion && ctx.Confirmed.Contains(f.Rel)) continue;
                                 if (!ctx.Files.TryGetValue(f.Rel, out var old) || old.Size != f.Size)
                                 {
                                     ctx.Files[f.Rel] = f;
+                                    ctx.Confirmed.Remove(f.Rel);
                                     dirtyFiles.Add(f.Rel);
                                     added++;
                                 }
                                 if (ctx.PendingDupes.TryGetValue(f.Rel, out var pending) &&
-                                    pending.IsConfirmedByListing(listingStarted, f.Size, knownSizes[f.Rel]))
+                                    pending.IsConfirmedByListing(listingStarted, f.Size, knownSizes.TryGetValue(f.Rel, out var expectedSize) ? expectedSize : f.Size))
                                 {
                                     ctx.PendingDupes.Remove(f.Rel);
                                     dirtyFiles.Add(f.Rel);
                                     added++;
                                 }
                             }
+                            // A corrected source may be smaller too. Do not retain the
+                            // largest size ever observed (including a bad target copy).
+                            foreach (var rel in dirtyFiles)
+                            {
+                                var sourceSize = contexts.Where(c => c.Site.AllowDownload)
+                                    .Select(c => c.Files.TryGetValue(rel, out var file) ? file.Size : 0).DefaultIfEmpty().Max();
+                                if (sourceSize > 0) knownSizes[rel] = sourceSize;
+                                else if (!knownSizes.ContainsKey(rel) && ctx.Files.TryGetValue(rel, out var file))
+                                    knownSizes[rel] = file.Size;
+                            }
+                            if (added > 0) evidenceVersion++;
+                            ctx.ListVersion = inFlight.Count == 0 && listingVersion == evidenceVersion ? listingVersion : -1;
                             // Register the parse task before exposing this listing to the
                             // coordinator. Otherwise a completion marker can end the race
                             // in the tiny window between listing the SFV and parsing it.
@@ -1769,6 +1800,7 @@ public sealed partial class WeaveEngine
                         listFails++;
                         if (listFails == 1 || listFails % 15 == 0)
                             LogJobLive(id, "warn", $"{ctx.Name} list failed ({listFails}x): {FirstLineOf(ex.Message)}");
+                        lock (sync) ctx.ListVersion = -1;
                     }
 
                     if (added > 0) workSignal.Release(Math.Min(added, 32));
@@ -1793,7 +1825,7 @@ public sealed partial class WeaveEngine
                         var known = contexts
                             .SelectMany(c => c.Files.Values)
                             .GroupBy(f => f.Rel, StringComparer.OrdinalIgnoreCase)
-                            .Select(g => (Rel: g.Key, Size: g.Max(f => f.Size)))
+                            .Select(g => (Rel: g.Key, Size: knownSizes.TryGetValue(g.Key, out var size) ? size : g.Max(f => f.Size)))
                             .ToList();
                         foreach (var rel in expectedFromSfv)
                             if (!known.Any(f => f.Rel.Equals(rel, StringComparison.OrdinalIgnoreCase)))
@@ -1803,7 +1835,7 @@ public sealed partial class WeaveEngine
                         coveredFiles = known.Count(CoveredForReachableMesh);
                         inFlightCount = inFlight.Count;
                         expectedFiles = expectedFromSfv.Count;
-                        allListed = contexts.All(c => c.Listed);
+                        allListed = contexts.All(c => c.Listed && c.ListVersion == evidenceVersion);
                         completionMarkerSeen = contexts.Any(c => c.CompletionSeen);
                         var sfvVisibleInMesh = known.Any(f => f.Rel.EndsWith(".sfv", StringComparison.OrdinalIgnoreCase) && f.Size > 0);
                         completionMarkerCanComplete = completionMarkerSeen && !sfvVisibleInMesh;
@@ -2113,7 +2145,7 @@ public sealed partial class WeaveEngine
             {
                 var known = contexts.SelectMany(c => c.Files.Values)
                     .GroupBy(f => f.Rel, StringComparer.OrdinalIgnoreCase)
-                    .Select(g => (Rel: g.Key, Size: g.Max(f => f.Size)))
+                    .Select(g => (Rel: g.Key, Size: knownSizes.TryGetValue(g.Key, out var size) ? size : g.Max(f => f.Size)))
                     .ToList();
                 foreach (var rel in expectedFromSfv)
                     if (!known.Any(f => f.Rel.Equals(rel, StringComparison.OrdinalIgnoreCase)))
@@ -2246,19 +2278,21 @@ public sealed partial class WeaveEngine
             // Files we must not retry before a given time (source still uploading them).
             var notBefore = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
             var uploadBusyRetries = new ConcurrentDictionary<string, (int Count, long Size)>(StringComparer.OrdinalIgnoreCase);
-            // Source sizes per rel path (to judge whether a dest copy is COMPLETE) and
-            // the set of files WE moved (never un-concede those).
             var sourceSizes = new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-            var sentByUs = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            long evidenceVersion = 0;
+            long sourceListVersion = -1;
+            long destinationListVersion = -1;
             var parsedSfvSizes = new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             var nextSfvRead = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
             var sfvReads = new ConcurrentDictionary<string, Task>(StringComparer.OrdinalIgnoreCase);
             var completeMarkers = CompleteMarkersFor(dstSite);
+            var sourceCompleteMarkers = CompleteMarkersFor(srcSite);
             var destinationComplete = 0;
             var completionDescription = "";
             var incompleteReason = "race stopped idle before completion";
             var nextCompletionProbe = DateTime.MinValue;
             var nextNestedSourceList = DateTime.MinValue;
+            long nestedSourceListVersion = -1;
             var nestedSourceFiles = new Dictionary<string, RaceFile>(StringComparer.OrdinalIgnoreCase);
 
             // NOTE: no separate dest-setup step. Every worker calls EnsureDestDirAsync for
@@ -2318,17 +2352,18 @@ public sealed partial class WeaveEngine
                 // unknown). A 0-byte/growing file is an opponent's in-flight claim: keep
                 // the file in play — the dest lister holds it via notBefore and frees it
                 // for a new attempt the moment the claim dies.
-                return size > 0 && (f.Size <= 0 || size >= f.Size);
+                return size > 0 && (f.Size <= 0 || size == f.Size);
             }
 
             void RecordSuccess(RaceFile f, DateTime startedAt)
             {
-                sentByUs.TryAdd(f.Rel, true);
-                transferred.TryAdd(f.Rel, true);
-                // With destination precheck disabled this local snapshot is the SFV
-                // completion source of truth. A successful final reply confirms that
-                // the complete file landed; no extra destination LIST is needed.
-                destinationFiles[f.Rel] = Math.Max(1, f.Size);
+                lock (sync)
+                {
+                    transferred.TryAdd(f.Rel, true);
+                    destinationFiles[f.Rel] = Math.Max(1, f.Size);
+                    // 226 confirms this attempt, not subsequent SFV/CRC acceptance.
+                    evidenceVersion++;
+                }
                 uploadBusyRetries.TryRemove(f.Rel, out _);
                 Interlocked.Add(ref cumulative, Math.Max(0, f.Size));
                 var cum = Interlocked.Read(ref cumulative);
@@ -2452,7 +2487,11 @@ public sealed partial class WeaveEngine
                         expectedRows.Add((rel, knownSize, "expected", $"listed in {sfvFile.Rel}"));
                     }
 
-                    parsedSfvSizes[sfvFile.Rel] = sfvFile.Size;
+                    lock (sync)
+                    {
+                        parsedSfvSizes[sfvFile.Rel] = sfvFile.Size;
+                        evidenceVersion++;
+                    }
                     if (expectedRows.Count == 0) return;
                     UpsertRaceFileRows(expectedRows);
                     LogJobLive(id, "info", $"parsed {sfvFile.Rel}: {expectedRows.Count} expected file(s)");
@@ -2482,25 +2521,28 @@ public sealed partial class WeaveEngine
             {
                 lock (sync)
                 {
-                    if (Volatile.Read(ref destinationComplete) != 0)
+                    description = "";
+                    if (inFlight.Count != 0 || !sfvReads.IsEmpty ||
+                        sourceListVersion != evidenceVersion || destinationListVersion != evidenceVersion)
+                        return false;
+                    // An unreadable/new SFV must not be bypassed by an old marker.
+                    if (sourceSizes.Any(f => f.Key.EndsWith(".sfv", StringComparison.OrdinalIgnoreCase) &&
+                        (!parsedSfvSizes.TryGetValue(f.Key, out var size) || size != f.Value)))
+                        return false;
+                    if (expectedFromSfv.Count > 0)
                     {
-                        description = completionDescription;
+                        foreach (var rel in expectedFromSfv)
+                            if (!destinationFiles.TryGetValue(rel, out var size) || size <= 0 ||
+                                (sourceSizes.TryGetValue(rel, out var expectedSize) && size != expectedSize))
+                                return false;
+                        foreach (var sfv in parsedSfvSizes)
+                            if (!destinationFiles.TryGetValue(sfv.Key, out var size) || size < sfv.Value)
+                                return false;
+                        description = "fresh destination listing confirms all SFV files and source sizes";
                         return true;
                     }
-                    if (expectedFromSfv.Count == 0)
-                    {
-                        description = "";
-                        return false;
-                    }
-                    foreach (var rel in expectedFromSfv)
-                    {
-                        if (!destinationFiles.TryGetValue(rel, out var destSize) || destSize <= 0)
-                        {
-                            description = "";
-                            return false;
-                        }
-                    }
-                    description = "all files listed in SFV are visible";
+                    if (destinationComplete == 0) return false;
+                    description = completionDescription;
                     return true;
                 }
             }
@@ -2538,7 +2580,14 @@ public sealed partial class WeaveEngine
                     var chk = await CheckReleaseOnAsync(probe, dstSite, req.DestPath, persist: false, probeCts.Token).ConfigureAwait(false);
                     dstPool.Return(probe);
                     probe = null;
-                    var complete = chk.State == ReleaseState.Complete;
+                    lock (sync)
+                    {
+                        // Learn an SFV supplied by another racer, but never finish
+                        // using CheckRelease's listing taken before reading that SFV.
+                        foreach (var file in chk.Sfv)
+                            if (expectedFromSfv.Add(file.Name)) evidenceVersion++;
+                    }
+                    var complete = SnapshotShowsComplete(out _);
                     if (complete)
                         LogJob(id, "info", $"race complete ({chk.Description})");
                     return complete;
@@ -2575,6 +2624,8 @@ public sealed partial class WeaveEngine
                         // A failed BORROW (dial refused, "530 too many connections", …)
                         // must never crash the lister — that used to fail the whole race.
                         var files = new List<RaceFile>();
+                        long listingVersion = -1;
+                        var listingSucceeded = false;
                         FtpClient? lister = null;
                         try
                         {
@@ -2584,15 +2635,23 @@ public sealed partial class WeaveEngine
                             // that STAT hot; refreshing Sample/Proof and other subdirs on
                             // every 25ms poll multiplied the round trips and delayed root
                             // discoveries by up to 100ms+ under load.
-                            var includeNested = DateTime.UtcNow >= nextNestedSourceList;
+                            bool includeNested;
+                            lock (sync)
+                            {
+                                listingVersion = evidenceVersion;
+                                includeNested = DateTime.UtcNow >= nextNestedSourceList ||
+                                    (inFlight.Count == 0 && nestedSourceListVersion != evidenceVersion);
+                            }
                             files = await ListSourceFilesAsync(lister, req.SourcePath, skiplist, ct,
-                                recursive: includeNested).ConfigureAwait(false);
+                                recursive: includeNested, completeMarkers: sourceCompleteMarkers, throwOnAnyFailure: true).ConfigureAwait(false);
+                            listingSucceeded = true;
                             if (includeNested)
                             {
                                 nestedSourceFiles.Clear();
                                 foreach (var nested in files.Where(file => file.ParentRel.Length > 0))
                                     nestedSourceFiles[nested.Rel] = nested;
                                 nextNestedSourceList = DateTime.UtcNow.AddMilliseconds(250);
+                                nestedSourceListVersion = listingVersion;
                             }
                             else if (nestedSourceFiles.Count > 0)
                             {
@@ -2620,7 +2679,22 @@ public sealed partial class WeaveEngine
                         {
                             foreach (var f in files)
                             {
+                                var changed = sourceSizes.TryGetValue(f.Rel, out var oldSize) && oldSize != f.Size;
+                                if (!sourceSizes.ContainsKey(f.Rel) || changed) evidenceVersion++;
                                 sourceSizes[f.Rel] = f.Size;
+                                if (changed)
+                                {
+                                    lock (attemptsLock) attempts.Remove(f.Rel);
+                                    notBefore.TryRemove(f.Rel, out _);
+                                }
+                                if (!inFlight.Contains(f.Rel) && transferred.ContainsKey(f.Rel) &&
+                                    (!destinationFiles.TryGetValue(f.Rel, out var destSize) || destSize != f.Size))
+                                {
+                                    transferred.TryRemove(f.Rel, out _);
+                                    destinationFiles.TryRemove(f.Rel, out _);
+                                    known.Remove(f.Rel);
+                                    pending.RemoveAll(p => p.Rel.Equals(f.Rel, StringComparison.OrdinalIgnoreCase));
+                                }
                                 if (transferred.ContainsKey(f.Rel)) continue;
                                 bool exceeded;
                                 lock (attemptsLock) { exceeded = AttemptsExceeded(attempts, f.Rel); }
@@ -2644,6 +2718,9 @@ public sealed partial class WeaveEngine
                                 added++;
                                 (newlyKnown ??= new List<RaceFile>()).Add(f);
                             }
+                            if (listingSucceeded && listingVersion == evidenceVersion && nestedSourceListVersion == listingVersion)
+                                sourceListVersion = listingVersion;
+                            else sourceListVersion = -1;
                             if (added > 0) SortPending();
                             pendingCount = pending.Count;
                             inFlightCount = inFlight.Count;
@@ -2684,11 +2761,8 @@ public sealed partial class WeaveEngine
                             j.SpeedBps = liveSpeed;
                         });
 
-                        // Cheap local completeness check on EVERY poll (no round trip): it
-                        // only reads the snapshot we already have. The idle-only gate below
-                        // never fired while a single file sat in backoff or "wait", so a
-                        // finished release could stay Running for a minute and keep holding
-                        // pooled connections that other races needed.
+                        // Completion uses snapshots obtained after the last transfer,
+                        // source-size change and SFV read, not a remembered 226 reply.
                         if (SnapshotShowsComplete(out var earlyDescription))
                         {
                             LogJob(id, "info", $"race complete ({earlyDescription})");
@@ -2979,7 +3053,8 @@ public sealed partial class WeaveEngine
                     {
                         if (FxpTransfer.RequiresConnectionDrop(ex)) { srcOk = false; dstOk = false; }
                         uploadBusyRetries.TryRemove(f.Rel, out _);
-                        transferred.TryAdd(f.Rel, true); // already on dest / -missing / dupe
+                        lock (sync) evidenceVersion++;
+                        transferred.TryAdd(f.Rel, true); // provisional until the next destination listing
                         if (FxpTransfer.IsDestinationDupeError(ex))
                             destinationFiles[f.Rel] = Math.Max(1, f.Size);
                         // X-DUPE replies list OTHER files already on the dest in this dir —
@@ -3033,96 +3108,71 @@ public sealed partial class WeaveEngine
                 }
             }
 
-            // Destination lister. Files already
-            // on the dest (won by another racer, or partial mid-upload by them) are
-            // unwinnable; marking them transferred means we never waste a slot on a
-            // doomed STOR round trip.
+            // Even with precheck off, reconcile completed attempts: a zipscript may
+            // remove a file after 226. A failed or overlapping listing is not evidence.
             async Task DestListerAsync()
             {
-                // Listing a dir that doesn't exist yet just fails harmlessly and is
-                // retried on the next cycle.
                 while (!ct.IsCancellationRequested && Volatile.Read(ref raceDone) == 0)
                 {
                     FtpClient? conn = null;
-                    try { conn = await dstPool.TryBorrowAsync(ct).ConfigureAwait(false); }
-                    catch (OperationCanceledException) { return; }
-                    catch { conn = null; } // dial refused — try again next cycle
-                    if (conn is not null)
+                    try
                     {
-                        try
+                        conn = await dstPool.TryBorrowAsync(ct).ConfigureAwait(false);
+                        if (conn is not null)
                         {
-                            var listSw = System.Diagnostics.Stopwatch.StartNew();
-                            var have = await ListSourceFilesAsync(conn, req.DestPath, skiplist, ct).ConfigureAwait(false);
-                            Volatile.Write(ref lastDestListMs, (int)Math.Min(int.MaxValue, listSw.ElapsedMilliseconds));
+                            long listingVersion;
+                            lock (sync) listingVersion = evidenceVersion;
+                            string? markerSeen = null;
+                            var timer = System.Diagnostics.Stopwatch.StartNew();
+                            var have = await ListSourceFilesAsync(conn, req.DestPath, skiplist, ct,
+                                completeMarkers: completeMarkers, onCompletionMarker: name => markerSeen = name,
+                                throwOnAnyFailure: true).ConfigureAwait(false);
+                            Volatile.Write(ref lastDestListMs, (int)Math.Min(int.MaxValue, timer.ElapsedMilliseconds));
                             dstPool.Return(conn);
                             conn = null;
-                            List<(string Rel, long Size, string Status, string Error)>? newlyOwnedRows = null;
+                            var invalidated = new List<string>();
                             lock (sync)
                             {
-                                var newlyOwned = 0;
-                                var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                                foreach (var h in have)
+                                if (listingVersion == evidenceVersion)
                                 {
-                                    present.Add(h.Rel);
-                                    destinationFiles[h.Rel] = h.Size;
-                                    if (completeMarkers.Any(marker => CompletionMarkerMatches(h.Name, marker)))
+                                    var present = have.ToDictionary(f => f.Rel, StringComparer.OrdinalIgnoreCase);
+                                    foreach (var rel in destinationFiles.Keys.Union(transferred.Keys, StringComparer.OrdinalIgnoreCase).ToList())
                                     {
-                                        completionDescription = $"completion marker {h.Name} visible";
-                                        Volatile.Write(ref destinationComplete, 1);
-                                    }
-                                    // Concede ONLY files that are COMPLETE on dest (size
-                                    // matches source, or source size unknown). A 0-byte /
-                                    // growing file is just an opponent's in-flight claim —
-                                    // conceding it forever hands them the whole release;
-                                    // instead hold off briefly so we don't hammer 553s,
-                                    // and contest it again if their transfer dies.
-                                    var complete = h.Size > 0 &&
-                                        (!sourceSizes.TryGetValue(h.Rel, out var ssz) || ssz <= 0 || h.Size >= ssz);
-                                    if (complete)
-                                    {
-                                        if (!inFlight.Contains(h.Rel) && transferred.TryAdd(h.Rel, true))
+                                        if (inFlight.Contains(rel)) continue;
+                                        if (present.TryGetValue(rel, out var file) && file.Size > 0 &&
+                                            (!sourceSizes.TryGetValue(rel, out var size) || file.Size == size)) continue;
+                                        destinationFiles.TryRemove(rel, out _);
+                                        if (transferred.TryRemove(rel, out _))
                                         {
-                                            newlyOwned++;
-                                            sourceSizes.TryGetValue(h.Rel, out var sourceSize);
-                                            newlyOwnedRows ??= new List<(string Rel, long Size, string Status, string Error)>();
-                                            newlyOwnedRows.Add((h.Rel, sourceSize > 0 ? sourceSize : h.Size, "dupe",
-                                                h.Size > 0 ? $"already on destination ({HumanBytes(h.Size)})" : "already on destination"));
+                                            known.Remove(rel);
+                                            pending.RemoveAll(p => p.Rel.Equals(rel, StringComparison.OrdinalIgnoreCase));
+                                            notBefore.TryRemove(rel, out _);
+                                            invalidated.Add(rel);
                                         }
                                     }
-                                    else if (!transferred.ContainsKey(h.Rel) && !inFlight.Contains(h.Rel))
+                                    foreach (var file in have)
                                     {
-                                        notBefore[h.Rel] = DateTime.UtcNow.AddMilliseconds(750);
+                                        if (inFlight.Contains(file.Rel)) continue;
+                                        destinationFiles[file.Rel] = file.Size;
+                                        if (destinationPrecheck && file.Size > 0 &&
+                                            (!sourceSizes.TryGetValue(file.Rel, out var size) || file.Size == size))
+                                            transferred.TryAdd(file.Rel, true);
                                     }
-                                }
-                                foreach (var rel in destinationFiles.Keys)
-                                {
-                                    if (present.Contains(rel) || sentByUs.ContainsKey(rel) || inFlight.Contains(rel)) continue;
-                                    destinationFiles.TryRemove(rel, out _);
-                                }
-                                // Un-concede claims that VANISHED from dest (opponent's
-                                // upload failed / 0-byte cleaned up) — cbftp re-races
-                                // these too via its continuous list comparison.
-                                foreach (var rel in transferred.Keys)
-                                {
-                                    if (present.Contains(rel) || sentByUs.ContainsKey(rel) || inFlight.Contains(rel)) continue;
-                                    if (transferred.TryRemove(rel, out _))
-                                    {
-                                        destinationFiles.TryRemove(rel, out _);
-                                        known.Remove(rel); // source lister re-queues it next poll
-                                    }
-                                }
-                                if (newlyOwned > 0)
                                     pending.RemoveAll(p => transferred.ContainsKey(p.Rel));
+                                    destinationComplete = markerSeen is null ? 0 : 1;
+                                    completionDescription = $"completion marker {markerSeen} visible";
+                                    destinationListVersion = inFlight.Count == 0 ? listingVersion : -1;
+                                }
                             }
-                            if (newlyOwnedRows is { Count: > 0 })
-                            {
-                                UpsertRaceFileRows(newlyOwnedRows);
-                                foreach (var row in newlyOwnedRows)
-                                    LogJobLive(id, "info", $"skipped {row.Rel}: already on destination");
-                            }
+                            foreach (var rel in invalidated)
+                                LogJobLive(id, "warn", $"destination file missing or incomplete after transfer: {rel}; queued for verification/retry");
                         }
-                        catch (OperationCanceledException) { if (conn is not null) dstPool.Drop(conn); return; }
-                        catch { if (conn is not null) dstPool.Drop(conn); } // dest dir may not exist yet — fine
+                    }
+                    catch (OperationCanceledException) { if (conn is not null) dstPool.Drop(conn); return; }
+                    catch
+                    {
+                        if (conn is not null) dstPool.Drop(conn);
+                        lock (sync) destinationListVersion = -1;
                     }
                     try { await Task.Delay(Math.Max(pollMs, 250), ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) { return; }
@@ -3132,8 +3182,7 @@ public sealed partial class WeaveEngine
             var listerTask = ListerAsync();
             var workerTasks = Enumerable.Range(0, workerCount).Select(_ => WorkerAsync()).ToList();
             workerTasks.Add(listerTask);
-            if (destinationPrecheck)
-                workerTasks.Add(DestListerAsync());
+            workerTasks.Add(DestListerAsync());
             await Task.WhenAll(workerTasks).ConfigureAwait(false);
             var remainingSfvReads = sfvReads.Values.ToArray();
             if (remainingSfvReads.Length > 0)
@@ -3766,7 +3815,7 @@ public sealed partial class WeaveEngine
     private async Task<List<RaceFile>> ListSourceFilesAsync(
         FtpClient src, string root, List<string> skiplist, CancellationToken ct, bool recursive = true,
         IReadOnlyList<string>? completeMarkers = null, Action<string>? onCompletionMarker = null,
-        bool throwOnRootFailure = false)
+        bool throwOnRootFailure = false, bool throwOnAnyFailure = false)
     {
         var result = new List<RaceFile>();
         await WalkAsync(src, root, "", 0).ConfigureAwait(false);
@@ -3780,7 +3829,8 @@ public sealed partial class WeaveEngine
             {
                 entries = await client.ListAsync(absDir, ct).ConfigureAwait(false);
             }
-            catch when (!throwOnRootFailure || depth > 0)
+            catch (OperationCanceledException) { throw; }
+            catch when (!throwOnAnyFailure && (!throwOnRootFailure || depth > 0))
             {
                 // A subdir we can't enter (glftpd tag/status dir, race-condition removal,
                 // permission) shouldn't abort the whole walk — just skip it silently.
@@ -3789,13 +3839,13 @@ public sealed partial class WeaveEngine
             foreach (var e in entries)
             {
                 if (e.Name is "." or "..") continue;
-                if (completeMarkers is not null && completeMarkers.Any(marker => CompletionMarkerMatches(e.Name, marker)))
-                    onCompletionMarker?.Invoke(e.Name);
+                var isCompletionMarker = completeMarkers is not null && completeMarkers.Any(marker => CompletionMarkerMatches(e.Name, marker));
+                if (isCompletionMarker) onCompletionMarker?.Invoke(e.Name);
                 var childAbs = FtpClient.JoinRemote(absDir, e.Name);
                 var childRel = relDir.Length == 0 ? e.Name : relDir + "/" + e.Name;
                 if (e.Type is "dir" or "link")
                 {
-                    if (IsVirtualDir(e.Name)) continue;                 // glftpd status/tag "dirs"
+                    if (isCompletionMarker || IsVirtualDir(e.Name)) continue; // status tags are not traversable directories
                     if (SkiplistMatches(childAbs, e.Name, skiplist)) continue;
                     if (!recursive && depth == 0) continue;
                     await WalkAsync(client, childAbs, childRel, depth + 1).ConfigureAwait(false);
@@ -3932,7 +3982,9 @@ public sealed partial class WeaveEngine
     private async Task<bool> ReleaseCompleteAfterTransferErrorAsync(
         string id, TransferRequest req, Exception error, JobRunControl run)
     {
-        if (string.IsNullOrWhiteSpace(req.ToSite) || string.IsNullOrWhiteSpace(req.DestPath))
+        // A race must finish through its reconciled snapshots. A name-only release
+        // check after an exception cannot prove that its source sizes were copied.
+        if (req.Race || string.IsNullOrWhiteSpace(req.ToSite) || string.IsNullOrWhiteSpace(req.DestPath))
             return false;
 
         try
@@ -3956,7 +4008,7 @@ public sealed partial class WeaveEngine
 
     // ---- local downloads --------------------------------------------------------------
 
-    public Job StartDownload(DownloadRequest req)
+    public Job StartDownload(DownloadRequest req, bool queueOnly = false)
     {
         req.Site = req.Site.Trim();
         req.SourcePath = req.SourcePath.Trim();
@@ -3991,13 +4043,14 @@ public sealed partial class WeaveEngine
         var saved = _store.UpsertJob(job);
         Log("transfer", req.Site + " > local", "info", $"queued download {req.SourcePath} -> {req.DestPath}");
         var run = RegisterJobToken(saved.Id);
+        if (queueOnly) PauseJob(saved.Id);
         ScheduleDownload(saved.Id, req, run);
-        return saved;
+        return _store.Job(saved.Id)!;
     }
 
     private void ScheduleDownload(string id, DownloadRequest req, JobRunControl run)
     {
-        var turn = _manualTransferQueue.Enqueue(id, run.Token, LocalTransferLimit(req.Site));
+        var turn = _manualTransferQueue.Enqueue(id, run.Token, IsJobPaused(id), LocalTransferLimit(req.Site));
         _ = Task.Run(() => RunQueuedDownloadJobAsync(id, req, run, turn));
     }
 
@@ -4010,6 +4063,7 @@ public sealed partial class WeaveEngine
             using var lease = await turn.ConfigureAwait(false);
             run.Token.ThrowIfCancellationRequested();
             if (_store.Job(id) is not { Terminal: false }) return;
+            await WaitWhilePausedAsync(id, run.Token).ConfigureAwait(false);
             ArmJobWatchdog(id, run);
             await RunDownloadJobAsync(id, req, run).ConfigureAwait(false);
         }
@@ -4752,7 +4806,7 @@ public sealed partial class WeaveEngine
 
     // ---- local uploads ----------------------------------------------------------------
 
-    public Job StartUpload(UploadRequest req)
+    public Job StartUpload(UploadRequest req, bool queueOnly = false)
     {
         req.Site = req.Site.Trim();
         req.SourcePath = req.SourcePath.Trim();
@@ -4784,13 +4838,14 @@ public sealed partial class WeaveEngine
         var saved = _store.UpsertJob(job);
         Log("transfer", "local > " + req.Site, "info", $"queued upload {req.SourcePath} -> {req.DestPath}");
         var run = RegisterJobToken(saved.Id);
+        if (queueOnly) PauseJob(saved.Id);
         ScheduleUpload(saved.Id, req, run);
-        return saved;
+        return _store.Job(saved.Id)!;
     }
 
     private void ScheduleUpload(string id, UploadRequest req, JobRunControl run)
     {
-        var turn = _manualTransferQueue.Enqueue(id, run.Token, LocalTransferLimit(req.Site));
+        var turn = _manualTransferQueue.Enqueue(id, run.Token, IsJobPaused(id), LocalTransferLimit(req.Site));
         _ = Task.Run(() => RunQueuedUploadJobAsync(id, req, run, turn));
     }
 
@@ -4803,6 +4858,7 @@ public sealed partial class WeaveEngine
             using var lease = await turn.ConfigureAwait(false);
             run.Token.ThrowIfCancellationRequested();
             if (_store.Job(id) is not { Terminal: false }) return;
+            await WaitWhilePausedAsync(id, run.Token).ConfigureAwait(false);
             ArmJobWatchdog(id, run);
             await RunUploadJobAsync(id, req, run).ConfigureAwait(false);
         }
@@ -5162,6 +5218,7 @@ public sealed partial class WeaveEngine
         lock (_poolLock)
             foreach (var pool in _pools.Values) pool.SetMeshDemand(id, false, false);
         _store.UpdateJob(id, j => j.Paused = true);
+        _manualTransferQueue.SetPaused(id, true);
         LogJob(id, "info", "job paused (finishes the file in flight, then waits)");
         return true;
     }
@@ -5172,6 +5229,7 @@ public sealed partial class WeaveEngine
         _meshScoreboard.SetPaused(id, false);
         var job = _store.UpdateJob(id, j => j.Paused = false);
         if (job is null) return false;
+        _manualTransferQueue.SetPaused(id, false);
         LogJob(id, "info", "job resumed");
         return true;
     }
@@ -5188,7 +5246,7 @@ public sealed partial class WeaveEngine
             return Task.Run(() => RunTransferJobAsync(id, req, run.Token, run));
         }
         var limit = new ManualTransferQueue.Limit("fxp", _store.Settings().MaxConcurrentFxpJobs);
-        var turn = _manualTransferQueue.Enqueue(id, run.Token, batch is null ? new[] { limit } : new[] { limit, batch });
+        var turn = _manualTransferQueue.Enqueue(id, run.Token, IsJobPaused(id), batch is null ? new[] { limit } : new[] { limit, batch });
         return Task.Run(async () =>
         {
             try

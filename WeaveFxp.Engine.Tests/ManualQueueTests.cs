@@ -8,6 +8,18 @@ internal static class ManualQueueTests
     {
         var queue = new ManualTransferQueue();
         var lane = new ManualTransferQueue.Limit("local:test", 1);
+        var held = queue.Enqueue("held", default, true, lane);
+        check(!held.IsCompleted && queue.Positions().ContainsKey("held"), "queue-only job stays pending on an idle queue");
+        using (await queue.Enqueue("immediate", default, lane))
+            check(!held.IsCompleted, "held job reserves no capacity and does not start after another transfer");
+        queue.SetPaused("held", false);
+        using (await held.WaitAsync(TimeSpan.FromSeconds(2)))
+            check(true, "explicit start releases a held job");
+        using var heldCancel = new CancellationTokenSource();
+        var cancelledHeld = queue.Enqueue("held-cancel", heldCancel.Token, true, lane);
+        heldCancel.Cancel();
+        try { using var unexpected = await cancelledHeld; check(false, "held cancellation cannot start a job"); }
+        catch (OperationCanceledException) { check(!queue.Positions().ContainsKey("held-cancel"), "held job can be cancelled without starting"); }
         using var active = await queue.Enqueue("active", default, lane);
         var first = queue.Enqueue("first", default, lane);
         var second = queue.Enqueue("second", default, lane);
@@ -99,6 +111,32 @@ internal static class ManualQueueTests
             check(order.SequenceEqual(new[] { "file-block.bin", "file-third.bin", "file-first.bin", "file-second.bin" }), "actual FTP RETR order follows manual queue changes");
             check(engine.RemoveManualJobs(jobs.Select(job => job.Id)) == 4 && jobs.All(job => engine.Job(job.Id) is null), "remove all removes every completed manual job");
 
+            var heldDownload = engine.StartDownload(new DownloadRequest
+            {
+                Site = "queue-test", SourcePath = "/file-first.bin", DestPath = Path.Combine(root, "held.bin")
+            }, queueOnly: true);
+            jobs.Add(heldDownload);
+            await Task.Delay(150);
+            check(engine.Job(heldDownload.Id) is { State: JobState.Queued, Paused: true } && order.Count == 4,
+                "queue-only download does not issue RETR until started");
+            engine.ResumeJob(heldDownload.Id);
+            await Until(() => engine.Job(heldDownload.Id)!.Terminal);
+            check(engine.Job(heldDownload.Id)!.State == JobState.Succeeded, "starting held download completes normally");
+
+            var heldUpload = engine.StartUpload(new UploadRequest
+            {
+                Site = "queue-test", SourcePath = Path.Combine(root, "held.bin"), DestPath = "/held-upload.bin"
+            }, queueOnly: true);
+            jobs.Add(heldUpload);
+            await Task.Delay(150);
+            check(engine.Job(heldUpload.Id) is { State: JobState.Queued, Paused: true } && !server.Files.ContainsKey("held-upload.bin"),
+                "queue-only upload does not start on an idle site");
+            engine.ResumeJob(heldUpload.Id);
+            await Until(() => engine.Job(heldUpload.Id)!.Terminal);
+            check(engine.Job(heldUpload.Id)!.State == JobState.Succeeded && server.Files["held-upload.bin"].Length == 64,
+                "starting held upload completes with server-confirmed data");
+            engine.RemoveManualJobs(new[] { heldDownload.Id, heldUpload.Id });
+
             order.Clear();
             blocked = new(TaskCreationOptions.RunContinuationsAsynchronously);
             release = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -108,6 +146,16 @@ internal static class ManualQueueTests
             jobs.Add(Start("first"));
             jobs.Add(Start("second"));
             engine.AddSite(server.Site("queue-target", true, true));
+            var heldFxp = engine.StartFxp(new TransferRequest
+            {
+                FromSite = "queue-test", ToSite = "queue-target", SourcePath = "/release", DestPath = "/release", DryRun = true
+            }, queueOnly: true);
+            await Task.Delay(150);
+            check(engine.Job(heldFxp.Id) is { State: JobState.Queued, Paused: true }, "queue-only FXP stays pending until explicit start");
+            engine.ResumeJob(heldFxp.Id);
+            await Until(() => engine.Job(heldFxp.Id)!.Terminal);
+            check(engine.Job(heldFxp.Id)!.State == JobState.Succeeded, "held FXP starts through the existing queue action");
+            engine.RemoveManualJobs(new[] { heldFxp.Id });
             var race = engine.StartFxp(new TransferRequest
             {
                 FromSite = "queue-test", ToSite = "queue-target", SourcePath = "/release", DestPath = "/release", Race = true, DryRun = true

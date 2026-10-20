@@ -1,6 +1,9 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using WeaveFxp.Engine.Core;
 using WeaveFxp.Engine.Models;
@@ -96,15 +99,24 @@ internal sealed class TransferServer : IAsyncDisposable
     private readonly List<Task> _sessions = new();
     private readonly Task _accept;
     private int _rejections;
+    private readonly X509Certificate2? _certificate;
     public int Rejections => Volatile.Read(ref _rejections);
     public ConcurrentDictionary<string, byte[]> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Func<string, string?>? Reject { get; set; }
     public Func<string, string?>? Reply { get; set; }
     public Func<string, Task>? BeforeCommand { get; set; }
     public Func<string, List<RemoteEntry>>? Listing { get; set; }
+    public Func<Task>? AfterListingSnapshot { get; set; }
 
-    public TransferServer()
+    public TransferServer(bool tls = false)
     {
+        if (tls)
+        {
+            using var rsa = RSA.Create(2048);
+            var request = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+            _certificate = new X509Certificate2(certificate.Export(X509ContentType.Pfx));
+        }
         _listener.Start();
         _accept = Accept();
     }
@@ -112,7 +124,7 @@ internal sealed class TransferServer : IAsyncDisposable
     public Site Site(string name, bool download, bool upload) => new()
     {
         Name = name, Host = "127.0.0.1", Port = ((IPEndPoint)_listener.LocalEndpoint).Port,
-        TlsMode = TlsMode.Off, LoginSlots = 4, DownloadSlots = 3, UploadSlots = 3,
+        TlsMode = _certificate is null ? TlsMode.Off : TlsMode.Implicit, LoginSlots = 4, DownloadSlots = 3, UploadSlots = 3,
         AllowDownload = download, AllowUpload = upload, UsePret = true, UseXdupe = false,
         SscnSupported = false, CpsvSupported = false, ListCommand = "STAT -l", TimeoutSeconds = 3
     };
@@ -135,8 +147,9 @@ internal sealed class TransferServer : IAsyncDisposable
         using (client)
         try
         {
-            using var reader = new StreamReader(client.GetStream(), Encoding.ASCII);
-            await using var writer = new StreamWriter(client.GetStream(), Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
+            using var control = await ServerStream(client);
+            using var reader = new StreamReader(control, Encoding.ASCII);
+            await using var writer = new StreamWriter(control, Encoding.ASCII) { NewLine = "\r\n", AutoFlush = true };
             await writer.WriteLineAsync("220 mesh regression FTP");
             while (await reader.ReadLineAsync(_stop.Token) is { } line)
             {
@@ -167,8 +180,13 @@ internal sealed class TransferServer : IAsyncDisposable
                             foreach (var entry in listing(pathStart >= 0 ? arg[pathStart..] : cwd))
                                 await writer.WriteLineAsync($"{(entry.Type == "dir" ? 'd' : entry.Type == "link" ? 'l' : '-')}rw-r--r-- 1 user group {entry.Size} Sep 05 12:00 {entry.Name}");
                         }
-                        else foreach (var file in Files)
-                            await writer.WriteLineAsync($"-rw-r--r-- 1 user group {file.Value.Length} Sep 05 12:00 {file.Key}");
+                        else
+                        {
+                            var snapshot = Files.ToArray();
+                            if (AfterListingSnapshot is { } afterSnapshot) await afterSnapshot();
+                            foreach (var file in snapshot)
+                                await writer.WriteLineAsync($"-rw-r--r-- 1 user group {file.Value.Length} Sep 05 12:00 {file.Key}");
+                        }
                         await writer.WriteLineAsync("213 End");
                         break;
                     case "PASV":
@@ -185,6 +203,12 @@ internal sealed class TransferServer : IAsyncDisposable
                         break;
                     case "RETR":
                     case "STOR":
+                        byte[]? download = null;
+                        if (parts[0] == "RETR" && !Files.TryGetValue(arg.Split('/').Last(), out download))
+                        {
+                            await writer.WriteLineAsync("550 file not found");
+                            break;
+                        }
                         await writer.WriteLineAsync("150 opening transfer");
                         using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token))
                         {
@@ -193,11 +217,12 @@ internal sealed class TransferServer : IAsyncDisposable
                                 ? await passive.AcceptTcpClientAsync(deadline.Token) : new TcpClient();
                             if (passive is null) await data.ConnectAsync(active!.Address, active.Port, deadline.Token);
                             var name = arg.Split('/').Last();
-                            if (parts[0] == "RETR") await data.GetStream().WriteAsync(Files[name], deadline.Token);
+                            using var dataStream = await ServerStream(data);
+                            if (parts[0] == "RETR") await dataStream.WriteAsync(download!, deadline.Token);
                             else
                             {
                                 using var bytes = new MemoryStream();
-                                await data.GetStream().CopyToAsync(bytes, deadline.Token);
+                                await dataStream.CopyToAsync(bytes, deadline.Token);
                                 Files[name] = bytes.ToArray();
                             }
                         }
@@ -221,6 +246,19 @@ internal sealed class TransferServer : IAsyncDisposable
         _listener.Stop();
         await _accept;
         await Task.WhenAll(_sessions);
+        _certificate?.Dispose();
         _stop.Dispose();
+    }
+
+    private async Task<Stream> ServerStream(TcpClient client)
+    {
+        if (_certificate is null) return client.GetStream();
+        var ssl = new SslStream(client.GetStream());
+        try
+        {
+            await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = _certificate }, _stop.Token);
+            return ssl;
+        }
+        catch { ssl.Dispose(); throw; }
     }
 }

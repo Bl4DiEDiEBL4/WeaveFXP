@@ -269,7 +269,7 @@
             <button @onclick="RetryContextJob" disabled="@(!CanRetryContextJob())">Retry</button>
             @if (ContextJob?.Paused == true)
             {
-                <button @onclick="ResumeContextJob">Resume</button>
+                <button @onclick="ResumeContextJob">@(ContextJob.State == JobState.Queued ? "Start" : "Resume")</button>
             }
             else
             {
@@ -1131,8 +1131,6 @@
         foreach (var pane in refresh)
             await ListPane(pane, true);
 
-        if (refresh.Count > 0)
-            Toast($"Refreshed {refresh.Count} browse(s) after transfer");
     }
 
     private async Task RefreshLocalDownloadBrowsesAsync(IReadOnlyList<Job> jobs)
@@ -1148,36 +1146,7 @@
         }
 
         foreach (var pane in refresh)
-        {
-            if (pane.Loading) continue;
-            pane.Loading = true;
-            try
-            {
-                var selectedPaths = pane.Selected
-                    .Where(index => index >= 0 && index < pane.Entries.Count)
-                    .Select(index => pane.Entries[index].Path)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var entries = await Task.Run(() => ListLocal(pane.Path));
-                pane.Entries = entries;
-                ApplySort(pane);
-                pane.Selected = pane.Entries
-                    .Select((entry, index) => (entry, index))
-                    .Where(item => selectedPaths.Contains(item.entry.Path))
-                    .Select(item => item.index)
-                    .ToHashSet();
-                pane.Loaded = true;
-                pane.Error = null;
-                UpdatePaneStatus(pane);
-            }
-            catch
-            {
-                // A transient local listing failure should not interrupt the download.
-            }
-            finally
-            {
-                pane.Loading = false;
-            }
-        }
+            await ListPane(pane, true);
     }
 
     private static bool ShouldRefreshPaneForJob(PaneModel pane, Job job)
@@ -1412,31 +1381,59 @@
 
     private async Task ListPane(PaneModel pane, bool silent = false)
     {
-        if (pane.Loading || string.IsNullOrEmpty(pane.Site)) return;
-        pane.Loading = true;
-        pane.Error = null;
-        pane.Status = IsLocalPane(pane) ? $"Opening {pane.Path}..." : $"Connecting to {pane.Site}…";
-        await InvokeAsync(StateHasChanged);
+        if (pane.Loading || (silent && pane.Refreshing) || string.IsNullOrEmpty(pane.Site)) return;
+        var version = ++pane.ListingVersion;
+        var site = pane.Site;
+        var path = pane.Path;
+        var local = IsLocalPane(pane);
+        bool Current() => pane.ListingVersion == version && pane.Site == site && pane.Path == path;
+        pane.Refreshing = silent;
+        if (!silent)
+        {
+            pane.Loading = true;
+            pane.Error = null;
+            pane.Status = local ? $"Opening {path}..." : $"Connecting to {site}…";
+            await InvokeAsync(StateHasChanged);
+        }
         try
         {
-            var entries = IsLocalPane(pane)
-                ? await Task.Run(() => ListLocal(pane.Path))
-                : await Engine.ListRemoteAsync(pane.Site, pane.Path, BrowseLogName(pane));
+            var entries = local
+                ? await Task.Run(() => ListLocal(path))
+                : await Engine.ListRemoteAsync(site, path, BrowseLogName(pane));
+            if (!Current()) return;
+            var comparer = local && OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            var selectedPaths = pane.Selected.Where(i => i >= 0 && i < pane.Entries.Count)
+                .Select(i => EntryPath(pane, pane.Entries[i])).ToHashSet(comparer);
+            var anchor = pane.Anchor >= 0 && pane.Anchor < pane.Entries.Count ? EntryPath(pane, pane.Entries[pane.Anchor]) : null;
             pane.Entries = entries;
             ApplySort(pane);
-            pane.Selected.Clear();
-            ClearCompare(pane);
+            pane.Selected = silent ? pane.Entries.Select((entry, index) => (entry, index))
+                .Where(item => selectedPaths.Contains(EntryPath(pane, item.entry)))
+                .Select(item => item.index).ToHashSet() : new();
+            pane.Anchor = silent && anchor is not null ? pane.Entries.FindIndex(entry => comparer.Equals(anchor, EntryPath(pane, entry))) : -1;
+            if (!silent) ClearCompare(pane);
             pane.Loaded = true;
+            pane.Error = null;
             UpdatePaneStatus(pane);
         }
         catch (Exception ex)
         {
-            pane.Error = ex.Message;
-            pane.Status = "Error";
-            if (!silent) Toast(ex.Message);
+            if (!silent && Current())
+            {
+                pane.Error = ex.Message;
+                pane.Status = "Error";
+                Toast(ex.Message);
+            }
         }
-        pane.Loading = false;
-        PersistBrowserState();
+        finally
+        {
+            if (pane.ListingVersion == version)
+            {
+                pane.Loading = false;
+                pane.Refreshing = false;
+            }
+        }
+        if (!silent && Current()) PersistBrowserState();
     }
 
     private void UpdatePaneStatus(PaneModel pane)
@@ -1533,7 +1530,7 @@
         pane.Entries = sorted.ToList();
     }
 
-    private void QueueFxp(PaneModel source, PaneModel dest)
+    private void QueueFxp(PaneModel source, PaneModel dest, bool queueOnly = false)
     {
         if (string.IsNullOrEmpty(source.Site)) { Toast("Source browse has no site"); return; }
         if (string.IsNullOrEmpty(dest.Site)) { Toast("Destination browse has no site"); return; }
@@ -1555,7 +1552,7 @@
                         Site = dest.Site,
                         SourcePath = src,
                         DestPath = dst,
-                    });
+                    }, queueOnly);
                 }
                 else if (!IsLocalPane(source) && IsLocalPane(dest))
                 {
@@ -1564,7 +1561,7 @@
                         Site = source.Site,
                         SourcePath = src,
                         DestPath = dst,
-                    });
+                    }, queueOnly);
                 }
                 else if (!IsLocalPane(source) && !IsLocalPane(dest))
                 {
@@ -1574,7 +1571,7 @@
                         ToSite = dest.Site,
                         SourcePath = src,
                         DestPath = dst,
-                    });
+                    }, queueOnly);
                 }
                 else
                 {
@@ -1774,7 +1771,7 @@
     private void TransferFromContext(bool queue)
     {
         if (_contextPane is null) return;
-        QueueFxp(_contextPane, OtherPane(_contextPane));
+        QueueFxp(_contextPane, OtherPane(_contextPane), queueOnly: queue);
         Toast(queue ? "Transfer queued" : "Transfer started");
         HideContext();
     }

@@ -576,7 +576,7 @@ public sealed class JsonStore
             if (job.State == JobState.Running && job.HeartbeatAt == default)
                 job.HeartbeatAt = DateTime.UtcNow;
             _state.Jobs[job.Id] = job;
-            PruneJobsLocked();
+            PruneJobsLocked(job.Terminal);
             InvalidateJobsSnapshotLocked();
             SaveLocked(StateSections.Jobs);
             return Clone(job);
@@ -598,8 +598,7 @@ public sealed class JsonStore
                 // cap bounds total history; trimming here made the race detail view lie.
                 job.Slots = new List<SlotProgress>();
             }
-            PruneJobsLocked();
-            _state.Jobs[id] = job;
+            PruneJobsLocked(job.Terminal);
             InvalidateJobsSnapshotLocked();
             SaveLocked(StateSections.Jobs);
             return Clone(job);
@@ -749,42 +748,57 @@ public sealed class JsonStore
 
     public int ClearStoredLogs() => _jobArchive.ClearLogs();
 
-    // Keep the stored job set bounded: completed jobs beyond the cap are dropped
-    // oldest-first (running/queued jobs are never pruned).
-    private int PruneJobsLocked()
+    // Active jobs never count towards the completed-history cap.
+    private int PruneJobsLocked(bool enforceHistoryLimit = true)
     {
-        // JSON is the hot working set only. Older terminal jobs are transactionally
-        // archived before removal, so full file/event history does not make jobs.json
-        // grow forever or get rewritten on every periodic flush.
-        var maxJobs = _state.Settings.StoredJobHistoryLimit <= 0
-            ? 150
-            : Math.Clamp(_state.Settings.StoredJobHistoryLimit, 25, 150);
-        if (_state.Jobs.Count <= maxJobs) return 0;
-        var doomed = _state.Jobs.Values
-            .Where(j => j.Terminal)
-            .OrderBy(j => j.CreatedAt)
-            .Take(_state.Jobs.Count - maxJobs)
-            .ToList();
-        if (doomed.Count == 0) return 0;
+        var removed = 0;
+        if (enforceHistoryLimit)
+        {
+            try
+            {
+                var ids = _jobArchive.RetainNewest(_state.Settings.CompletedJobHistoryLimit,
+                    _state.Jobs.Values.ToList());
+                foreach (var id in ids)
+                {
+                    _state.Jobs.Remove(id);
+                    _terminalJobSnapshots.Remove(id);
+                }
+                removed = ids.Count;
+                if (removed > 0) InvalidateJobsSnapshotLocked();
+            }
+            catch (Exception ex)
+            {
+                LoadWarning = $"History retention failed; jobs kept: {ex.Message}";
+                return 0;
+            }
+        }
 
+        // Move older retained jobs into SQLite before removing them from JSON.
+        var maxJobs = Math.Clamp(_state.Settings.StoredJobHistoryLimit, 25, 150);
+        var archived = _state.Jobs.Values
+            .Where(j => j.Terminal)
+            .OrderBy(j => j.CreatedAt).ThenBy(j => j.Id, StringComparer.Ordinal)
+            .Take(Math.Max(0, _state.Jobs.Count - maxJobs))
+            .ToList();
+        if (archived.Count == 0) return removed;
         try
         {
-            _jobArchive.Archive(doomed
+            _jobArchive.Archive(archived
                 .Select(job => (job, JsonSerializer.Serialize(job, CompactJsonOptions)))
                 .ToList());
         }
         catch (Exception ex)
         {
             LoadWarning = $"Job archive failed; jobs kept in JSON: {ex.Message}";
-            return 0;
+            return removed;
         }
-        foreach (var job in doomed)
+        foreach (var job in archived)
         {
             _state.Jobs.Remove(job.Id);
             _terminalJobSnapshots.Remove(job.Id);
         }
         InvalidateJobsSnapshotLocked();
-        return doomed.Count;
+        return removed + archived.Count;
     }
 
     public int ClearJobs()

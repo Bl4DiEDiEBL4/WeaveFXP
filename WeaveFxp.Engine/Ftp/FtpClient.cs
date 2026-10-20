@@ -961,6 +961,12 @@ public sealed class FtpClient : IDisposable
                 progress?.Report(total);
             }
             await stream.FlushAsync(ct).ConfigureAwait(false);
+            // STOR completes when the server sees EOF, not when our buffer is flushed.
+            if (stream is SslStream ssl)
+                await ssl.ShutdownAsync().WaitAsync(DataTimeout, ct).ConfigureAwait(false);
+            stream.Dispose();
+            stream = null;
+            dtcp.Dispose();
             await WaitFinalAsync().ConfigureAwait(false);
             return total;
         }

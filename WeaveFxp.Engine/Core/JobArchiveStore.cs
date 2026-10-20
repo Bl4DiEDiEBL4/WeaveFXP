@@ -242,6 +242,48 @@ internal sealed class JobArchiveStore
         return Convert.ToInt32(command.ExecuteScalar());
     }
 
+    // Apply one global cap, including the terminal jobs still held in JSON.
+    // Temporary tables keep payloads out of memory and all archive changes atomic.
+    public List<string> RetainNewest(int limit, IReadOnlyCollection<Job> hotJobs)
+    {
+        if (limit < 1) throw new ArgumentOutOfRangeException(nameof(limit));
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "CREATE TEMP TABLE hot_history (id TEXT PRIMARY KEY, created_ticks INTEGER, terminal INTEGER);";
+        command.ExecuteNonQuery();
+        foreach (var job in hotJobs)
+        {
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = "INSERT INTO hot_history VALUES ($id, $created, $terminal);";
+            insert.Parameters.AddWithValue("$id", job.Id);
+            insert.Parameters.AddWithValue("$created", Ticks(job.CreatedAt));
+            insert.Parameters.AddWithValue("$terminal", job.Terminal ? 1 : 0);
+            insert.ExecuteNonQuery();
+        }
+        command.CommandText = """
+            DELETE FROM archived_jobs WHERE id IN (SELECT id FROM hot_history);
+            CREATE TEMP TABLE kept_history (id TEXT PRIMARY KEY);
+            INSERT INTO kept_history
+            SELECT id FROM (
+                SELECT id, created_ticks FROM archived_jobs
+                UNION ALL
+                SELECT id, created_ticks FROM hot_history WHERE terminal=1
+            ) ORDER BY created_ticks DESC, id DESC LIMIT $limit;
+            DELETE FROM archived_jobs WHERE id NOT IN (SELECT id FROM kept_history);
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+        command.ExecuteNonQuery();
+        command.CommandText = "SELECT id FROM hot_history WHERE terminal=1 AND id NOT IN (SELECT id FROM kept_history);";
+        var removedHotIds = new List<string>();
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) removedHotIds.Add(reader.GetString(0));
+        transaction.Commit();
+        return removedHotIds;
+    }
+
     public bool Delete(string id)
     {
         using var connection = Open();

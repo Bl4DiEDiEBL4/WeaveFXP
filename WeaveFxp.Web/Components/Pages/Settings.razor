@@ -46,6 +46,8 @@
             <label class="opt"><input type="checkbox" @bind="_form.UseActiveModeAddress" /> <span><span class="opt-name">Active address</span><span class="fh">Use the configured active-mode IP when needed.</span></span></label>
             <label class="compact-field">Hot JSON jobs<input type="number" min="25" max="150" @bind="_form.StoredJobHistoryLimit" /></label>
             <p class="hint">Older completed jobs are moved to the SQLite history archive.</p>
+            <label class="compact-field">Completed jobs to keep<input type="number" min="1" max="100000" @bind="_form.CompletedJobHistoryLimit" /></label>
+            <p class="hint">Total history, including archived jobs. Default: 1,000. Applied at startup, on completion and when saving settings. The oldest completed, failed and cancelled jobs beyond the limit are deleted. Running and queued jobs are kept. One release transfer counts as one job, including all its files. Freed database space is reused; the file may not shrink immediately.</p>
         </article>
 
         <article class="card">
@@ -232,7 +234,7 @@
                             <label><input type="checkbox" @bind="_form.FtpDebugLog" /> Debug: also log FTP protocol for API-triggered races</label>
                         </div>
                         <p class="fh">Manual browsing, transfers and downloads always write to the FTP Log. Races started over the API run silent so logging does not cost throughput; tick this only when debugging one.</p>
-                        <label class="opt"><input type="checkbox" @bind="_form.RaceDestinationPrecheck" /> <span><span class="opt-name">Destination precheck</span><span class="fh">Poll the target during a race to skip files already appearing there. Leave off for fastest racing; X-DUPE still learns server dupes.</span></span></label>
+                        <label class="opt"><input type="checkbox" @bind="_form.RaceDestinationPrecheck" /> <span><span class="opt-name">Destination precheck</span><span class="fh">Use target listings to skip existing files before transfer. Completed transfers are always checked again so missing files can be retried.</span></span></label>
                     </section>
 
                     <section class="panel-card">
