@@ -1,4 +1,4 @@
-# WeaveFXP v1.0.3
+# WeaveFXP v1.0.4
 
 WeaveFXP is a self-hosted FXP client with a dark web UI, a headless transfer
 engine and a JSON API. It is built for site-to-site racing, manual browsing and
@@ -17,9 +17,9 @@ engine runs in the same process.
 
 Choose the release for your machine:
 
-- Windows: `WeaveFXP-v1.0.3-win-x64.zip`
-- Linux PC/server: `WeaveFXP-v1.0.3-linux-x64.zip`
-- Linux ARM64: `WeaveFXP-v1.0.3-linux-arm64.zip`
+- Windows: `WeaveFXP-v1.0.4-win-x64.zip`
+- Linux PC/server: `WeaveFXP-v1.0.4-linux-x64.zip`
+- Linux ARM64: `WeaveFXP-v1.0.4-linux-arm64.zip`
 
 1. Download the release for your platform.
 2. Extract the executable into its own folder, for example `D:\WeaveFXP`.
@@ -73,7 +73,18 @@ maintenance.
   order list settings.
 - Site-to-site FXP with PASV/EPSV, PRET, SSCN/CPSV, TLS data handling and XDUPE.
 - Race jobs with target-aware duplicate skipping before transfer start.
+- Bounded automatic retries for incomplete directional and mesh races. Under
+  **Settings → Transfers → Racing**, choose **Retry incomplete race (extra attempts)**
+  (default 3; 0 disables) and **Wait between retries (seconds)** (default 30).
+  A retry rechecks the destination, refreshes file-attempt limits and keeps the same
+  job/history. Successful races and cancelled jobs are not automatically retried.
+  JSON settings: `incomplete_race_retries` (0–20) and
+  `incomplete_race_retry_delay_seconds` (1–3600).
 - SFV-based completion checks, with configurable marker fallback per site.
+- Read-only late-completion verification after destination occupancy, plus a
+  separate **Recheck** action for failed races. The completion recheck window
+  defaults to 300 seconds; `race_completion_recheck_seconds` accepts 0-3600,
+  with 0 disabling additional waiting. Verification does not retry uploads.
 - Queue actions: start, pause, stop, cancel, retry, restart and remove.
 - History pages for transfer jobs and release checks.
 - System/API/FTP/transfer logs.
@@ -105,7 +116,15 @@ publish.bat win-x64
 publish.bat win-x64 linux-x64 linux-arm64
 ```
 
+The Windows script builds and packages all requested runtimes in temporary staging
+first. Only an instance running from the exact destination executable blocks
+publishing; a separate preview may stay open. Existing runtime data is left in
+place, and a failed restore or compilation leaves the existing releases intact.
+
 Linux/macOS shell:
+
+Requires the .NET SDK and Python 3. Builds and packages are staged before current
+artifacts are replaced; runtime data stays in its existing directory.
 
 ```bash
 ./publish.sh
@@ -118,9 +137,9 @@ The publish scripts create:
 Release\win-x64\WeaveFXP.exe
 Release\linux-x64\WeaveFXP
 Release\linux-arm64\WeaveFXP
-Release\zips\WeaveFXP-v1.0.3-win-x64.zip
-Release\zips\WeaveFXP-v1.0.3-linux-x64.zip
-Release\zips\WeaveFXP-v1.0.3-linux-arm64.zip
+Release\zips\WeaveFXP-v1.0.4-win-x64.zip
+Release\zips\WeaveFXP-v1.0.4-linux-x64.zip
+Release\zips\WeaveFXP-v1.0.4-linux-arm64.zip
 ```
 
 Ship the zip for the target platform. Runtime `data` is not included in release
@@ -141,6 +160,17 @@ set WEAVEFXP_STATE=D:\WeaveFXP\data\state.json
 ```
 
 ## Changelog
+
+### v1.0.4 - 2026-11-17
+
+- Fixed freezing when retrying many failed races; retries now follow the race limit and new races get priority.
+- Stopped repeated retries on disk-full errors and fixed stuck directory listings.
+- Fixed race completion checks, duplicate retry loops and incorrect file counters.
+- Show the complete SFV file list with transfer status and whether each file was uploaded by this client.
+- Improved FTP/FTPS transfers, filename handling and skiplist rules.
+- Added prepared races and per-race site controls.
+- Improved the settings layout and readability on 1080p screens.
+- Fixed Windows console startup and preserved existing data when publishing fails.
 
 ### v1.0.3 - 2026-10-20
 

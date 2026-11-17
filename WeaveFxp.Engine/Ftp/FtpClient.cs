@@ -16,6 +16,11 @@ public sealed class FtpEndpoint
 
 public enum ResponseTraceMode { Full, ListingSummary }
 
+internal sealed class FtpDirectoryNotFoundException(string path, string message) : IOException(message)
+{
+    public string RemotePath { get; } = path;
+}
+
 public sealed class Cp437Encoding : Encoding
 {
     public static readonly Cp437Encoding Instance = new();
@@ -106,7 +111,7 @@ public sealed class FtpClient : IDisposable
         public int XdupeMode;
         public int TimeoutSeconds;
         public bool SkipEmptyFolders = true;
-        public List<string> Skiplist = new();
+        public List<SkiplistEntry> Skiplist = new();
         public List<string> OrderList = new();
         public bool CwdBeforeStatListing;
         public int TcpSendBufferKBytes;
@@ -140,7 +145,7 @@ public sealed class FtpClient : IDisposable
                 XdupeMode = site.XdupeMode,
                 TimeoutSeconds = site.TimeoutSeconds,
                 SkipEmptyFolders = true,
-                Skiplist = new List<string>(site.Skiplist),
+                Skiplist = site.Skiplist.Select(e => e.Clone()).ToList(),
                 OrderList = new(),
             };
         }
@@ -220,7 +225,7 @@ public sealed class FtpClient : IDisposable
 
     private FtpClient(Config cfg) => _cfg = cfg;
 
-    public IReadOnlyList<string> ConfiguredSkiplist() => _cfg.Skiplist;
+    public IReadOnlyList<SkiplistEntry> ConfiguredSkiplist() => _cfg.Skiplist;
     public IReadOnlyList<string> ConfiguredOrderList() => _cfg.OrderList;
 
     public static async Task<FtpClient> DialAndLoginAsync(Config cfg, CancellationToken ct = default)
@@ -436,6 +441,8 @@ public sealed class FtpClient : IDisposable
 
     public async Task<(int code, string msg)> CommandAsync(string line, ResponseTraceMode traceMode = ResponseTraceMode.Full)
     {
+        var changesDirectory = line.StartsWith("CWD ", StringComparison.OrdinalIgnoreCase);
+        if (changesDirectory) _currentDir = null;
         Trace("> " + MaskCommand(line));
         try
         {
@@ -450,9 +457,37 @@ public sealed class FtpClient : IDisposable
         TraceResponse(code, msg, traceMode);
         // Track the working directory (cbftp keeps per-conn CWD state the same way) so
         // EnsureCwdAsync can skip redundant CWDs on repeat transfers in the same dir.
-        if (line.StartsWith("CWD ", StringComparison.OrdinalIgnoreCase))
-            _currentDir = code / 100 == 2 ? line[4..].Trim() : null;
+        if (changesDirectory)
+        {
+            // A queued 226/225 or old STAT response cannot acknowledge this CWD.
+            // Keep cbftp's compatibility with daemons returning 200 instead of 250.
+            if (code / 100 == 2 && code is not (200 or 250))
+                throw UnexpectedControlReply(line, code, msg);
+            _currentDir = code is 200 or 250 ? line[4..].Trim() : null;
+        }
         return (code, msg);
+    }
+
+    private IOException UnexpectedControlReply(string command, int code, string message)
+    {
+        _currentDir = null;
+        // The reply's command is unknown; draining until any 2xx would risk
+        // assigning another directory's pending listing to the current request.
+        Dispose();
+        return new IOException($"Unexpected reply to {command}: {code} {message}; control connection discarded");
+    }
+
+    private static IOException DirectoryFailure(string command, string path, int code, string message)
+    {
+        var detail = $"{command} failed: {code} {message}";
+        // 550 also means access denied. Only an explicit missing path can unblock
+        // a first upload; arbitrary listing failures must not imply an empty dir.
+        if (code == 550 && !message.Contains("denied", StringComparison.OrdinalIgnoreCase) &&
+            (message.Contains("no such file", StringComparison.OrdinalIgnoreCase) ||
+             message.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+             message.Contains("does not exist", StringComparison.OrdinalIgnoreCase)))
+            return new FtpDirectoryNotFoundException(path, detail);
+        return new IOException(detail);
     }
 
     // Broken FTP daemons sometimes emit extra standalone welcome/TLS setup replies.
@@ -510,7 +545,7 @@ public sealed class FtpClient : IDisposable
         if (dir.Length == 0) dir = "/";
         if (_currentDir is not null && _currentDir.Equals(dir, StringComparison.Ordinal)) return;
         var (code, msg) = await CommandAsync("CWD " + dir).ConfigureAwait(false);
-        if (code / 100 != 2) throw new IOException($"CWD {dir} failed: {code} {msg}");
+        if (code / 100 != 2) throw DirectoryFailure("CWD " + dir, dir, code, msg);
     }
 
     // A transfer starts with a preliminary 1xx response (normally 125 or 150).
@@ -670,6 +705,8 @@ public sealed class FtpClient : IDisposable
                 var ep = ParsePassive(code, msg);
                 return (RewritePassiveHost(ep), command);
             }
+            // The FXP caller must restore TLS roles before falling back from CPSV.
+            throw new IOException($"{command} failed: {code} {msg}");
         }
         if (_cfg.UseEpsv)
         {
@@ -820,6 +857,22 @@ public sealed class FtpClient : IDisposable
 
     public async Task<List<RemoteEntry>> ListAsync(string path, CancellationToken ct = default)
     {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(Timeout));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        // STAT is a control-channel read: socket ReceiveTimeout does not bound async
+        // reads. Abort only this borrowed connection so a stalled listing cannot keep
+        // a cancelled race (and its scheduler permit) alive indefinitely.
+        using var abort = linked.Token.Register(Dispose);
+        try { return await ListCoreAsync(path, linked.Token).ConfigureAwait(false); }
+        catch (Exception) when (linked.IsCancellationRequested)
+        {
+            ct.ThrowIfCancellationRequested();
+            throw new TimeoutException($"FTP listing timed out after {Timeout}s: {path}");
+        }
+    }
+
+    private async Task<List<RemoteEntry>> ListCoreAsync(string path, CancellationToken ct)
+    {
         var listCommand = string.IsNullOrWhiteSpace(_cfg.ListCommand) ? "LIST" : _cfg.ListCommand.Trim();
         var isStat = listCommand.TrimStart().StartsWith("STAT", StringComparison.OrdinalIgnoreCase);
         if (isStat && _cfg.CwdBeforeStatListing)
@@ -829,17 +882,24 @@ public sealed class FtpClient : IDisposable
         }
 
         var command = isStat && _cfg.CwdBeforeStatListing
-            ? listCommand
+            // An explicit current-directory target also prevents stale PRET LIST
+            // state on a daemon from redirecting this control-channel listing.
+            ? StatCommandInCurrentDirectory(listCommand)
             : CommandWithPath(listCommand, path);
         if (command.TrimStart().StartsWith("STAT", StringComparison.OrdinalIgnoreCase))
         {
             var (code, msg) = await CommandAsync(command, ResponseTraceMode.ListingSummary).ConfigureAwait(false);
-            if (code / 100 != 2) throw new IOException($"{command} failed: {code} {msg}");
+            if (code is not (211 or 212 or 213))
+            {
+                if (code / 100 == 2) throw UnexpectedControlReply(command, code, msg);
+                throw DirectoryFailure(command, path, code, msg);
+            }
             var entries = ParseList(msg, path);
             TraceUnparsedListing(msg, entries.Count);
             return entries;
         }
 
+        await SetSscnAsync(false).ConfigureAwait(false);
         await MaybePretAsync(command).ConfigureAwait(false);
         var (ep, _) = await EnterPassiveAsync("").ConfigureAwait(false);
         var dtcp = await OpenDataTcpAsync(ep, ct).ConfigureAwait(false);
@@ -876,6 +936,7 @@ public sealed class FtpClient : IDisposable
     {
         await SetBinaryAsync().ConfigureAwait(false);
         var command = "RETR " + path;
+        await SetSscnAsync(false).ConfigureAwait(false);
         await MaybePretAsync(command).ConfigureAwait(false);
         if (restartOffset > 0)
         {
@@ -932,6 +993,7 @@ public sealed class FtpClient : IDisposable
     {
         await SetBinaryAsync().ConfigureAwait(false);
         var command = "STOR " + path;
+        await SetSscnAsync(false).ConfigureAwait(false);
         await MaybePretAsync(command).ConfigureAwait(false);
         var (ep, _) = await EnterPassiveAsync("").ConfigureAwait(false);
         var dtcp = await OpenDataTcpAsync(ep, ct).ConfigureAwait(false);
@@ -991,6 +1053,13 @@ public sealed class FtpClient : IDisposable
 
     // ---- parsing helpers --------------------------------------------------------------
 
+    private static string StatCommandInCurrentDirectory(string command)
+    {
+        var words = command.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        // Preserve an administrator's explicit target (including an existing dot).
+        return words.Skip(1).Any(word => !word.StartsWith('-')) ? command : CommandWithPath(command, ".");
+    }
+
     private static string CommandWithPath(string command, string path)
     {
         command = command.Trim();
@@ -1026,7 +1095,16 @@ public sealed class FtpClient : IDisposable
         var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var entry = new RemoteEntry { Name = line, Type = "unknown", Raw = line };
         if (parts.Length < 9) return entry;
-        entry.Name = string.Join(' ', parts[8..]);
+        // Only the first eight metadata columns are whitespace-delimited. The
+        // pathname is opaque: collapsing interior spaces breaks subsequent CWDs.
+        var nameStart = 0;
+        for (var column = 0; column < 8; column++)
+        {
+            while (nameStart < line.Length && line[nameStart] == ' ') nameStart++;
+            while (nameStart < line.Length && line[nameStart] != ' ') nameStart++;
+        }
+        while (nameStart < line.Length && line[nameStart] == ' ') nameStart++;
+        entry.Name = line[nameStart..];
         entry.Type = parts[0][0] switch
         {
             'd' => "dir",

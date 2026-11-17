@@ -87,8 +87,7 @@ public sealed partial class WeaveEngine
     {
         try
         {
-            foreach (var row in _store.Jobs()
-                .SelectMany(job => job.Files)
+            foreach (var row in _store.CompletedTransferSamples()
                 .Where(row => row.Status == "done" && row.Bps > 0 && row.Size >= 1024 * 1024 &&
                     !string.IsNullOrWhiteSpace(row.FromSite) && !string.IsNullOrWhiteSpace(row.ToSite))
                 .OrderBy(row => row.StartedAt))
@@ -136,22 +135,38 @@ public sealed partial class WeaveEngine
         }
     }
 
+    private const int MaxPrewarmFleet = 16;
+    private readonly SemaphoreSlim _prewarmGate = new(6, 6);
+
     private async Task PrimeSitePoolsAsync()
     {
         var sites = _store.Sites();
+        // Large fleets connect on demand. Existing warm pools still keep their sessions.
+        if (sites.Count > MaxPrewarmFleet)
+        {
+            Log("system", "", "info", $"{sites.Count} sites: skipping eager prewarm, pools warm on demand");
+            return;
+        }
         await Task.WhenAll(sites.Select(PrimeSitePoolAsync)).ConfigureAwait(false);
     }
 
     private async Task PrimeSitePoolAsync(Site site)
     {
+        await _prewarmGate.WaitAsync().ConfigureAwait(false);
         SitePool? pool = null;
         try
         {
+            // Imports and saves share the startup budget. Recheck after waiting: the
+            // fleet may have grown, or this site may have changed or been removed.
+            if (_store.Sites().Count > MaxPrewarmFleet) return;
+            var current = _store.Site(site.Name);
+            if (current is null) return;
+            site = current;
             pool = AcquirePool(site.Name, site, FtpConfig(site, site.Name, false));
-            var slots = Math.Max(
-                ResolveSiteSlots(site.DownloadSlots, site),
-                ResolveSiteSlots(site.UploadSlots, site));
-            var target = Math.Min(pool.Max - 1, Math.Max(2, slots + 1));
+            // Only warm a couple of connections: enough that the first list + first
+            // transfer of a race fire without a cold dial. The race's own WarmUpAsync
+            // fills the rest of the slots on demand once work actually arrives.
+            var target = Math.Min(pool.Max - 1, 2);
             await pool.WarmUpAsync(target, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -161,6 +176,7 @@ public sealed partial class WeaveEngine
         finally
         {
             if (pool is not null) ReleasePool(site.Name);
+            _prewarmGate.Release();
         }
     }
 
@@ -183,7 +199,7 @@ public sealed partial class WeaveEngine
             var version = Assembly.GetExecutingAssembly()
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
                 ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
-                ?? "1.0.3";
+                ?? "1.0.4";
             var metadata = version.IndexOf('+');
             return metadata < 0 ? version : version[..metadata];
         }
@@ -392,7 +408,7 @@ public sealed partial class WeaveEngine
         var cfg = FtpClient.Config.FromSite(site);
         var name = string.IsNullOrWhiteSpace(logAlias) ? site.Name : logAlias.Trim();
         cfg.SkipEmptyFolders = settings.SkipEmptyFolders;
-        cfg.Skiplist = MergePatternLists(settings.GlobalSkiplist, site.Skiplist);
+        cfg.Skiplist = MergeSkiplists(settings.GlobalSkiplist, site.Skiplist);
         cfg.OrderList = MergePatternLists(settings.GlobalOrderList);
         cfg.CwdBeforeStatListing = !string.IsNullOrWhiteSpace(logAlias);
         cfg.TcpSendBufferKBytes = settings.TcpSendBufferKBytes;
@@ -423,6 +439,7 @@ public sealed partial class WeaveEngine
         if (string.IsNullOrWhiteSpace(settings.DataProxyPassword)) settings.DataProxyPassword = current.DataProxyPassword;
         if (settings.CreatedAt == default) settings.CreatedAt = current.CreatedAt;
         var saved = _store.UpdateSettings(settings);
+        _raceTransferQueue.SetCapacity("race", saved.MaxConcurrentRaceJobs);
         Log("system", "settings", "info", "settings saved");
         _ = Task.Run(PrimeSitePoolsAsync);
         NotifyChanged();
@@ -478,6 +495,9 @@ public sealed partial class WeaveEngine
     }
 
     public List<Job> Jobs() => _store.Jobs();
+    public int JobCount => _store.HotJobCount;
+    public List<Job> JobsForUi(IEnumerable<string>? expandedJobs = null, bool includeManualEvents = false)
+        => _store.JobsForUi(expandedJobs, includeManualEvents);
     public List<Job> HistoryJobs(int archiveLimit = 10000) => _store.HistoryJobs(archiveLimit);
     public int ArchivedJobCount() => _store.ArchivedJobCount();
     public Job? Job(string id) => _store.Job(id);
@@ -552,7 +572,13 @@ public sealed partial class WeaveEngine
 
     public bool RetryJob(string id)
     {
-        var existing = _store.Job(id);
+        lock (_raceAnnounceLock)
+            return !_raceMutations.Contains(id) && RetryJobCore(id);
+    }
+
+    private bool RetryJobCore(string id)
+    {
+        var existing = _store.JobHeader(id);
         if (existing is null || !existing.Terminal) return false;
 
         if (string.IsNullOrWhiteSpace(existing.Request.FromSite) ||
@@ -577,13 +603,15 @@ public sealed partial class WeaveEngine
             j.BytesDone = 0; j.BytesTotal = 0; j.CumulativeBytes = 0; j.SpeedBps = 0;
             j.FilesDone = 0; j.FilesCovered = 0; j.FilesTotal = 0; j.CurrentFile = "";
             j.Slots = new List<SlotProgress>();
+            j.RaceCoverageKnown = j.Type == JobType.Race;
             j.Events.Add(new JobEvent { Time = DateTime.UtcNow, Level = "info", Message = "— retry: job restarted —" });
-        });
+        }, headerOnly: true);
         if (reset is null)
         {
             UnregisterJobToken(id, run);
             return false;
         }
+        HoldForGlobalStop(id);
         NotifyChanged();
 
         if (existing.Type == JobType.Download)
@@ -614,16 +642,20 @@ public sealed partial class WeaveEngine
             return true;
         }
 
-        _ = ScheduleTransfer(id, existing.Request, run);
+        _ = ScheduleTransfer(id, existing.Request, run, retry: true);
         return true;
     }
 
     public bool RestartJob(string id)
     {
-        var existing = _store.Job(id);
-        if (existing is null) return false;
-        if (!existing.Terminal) CancelJobInternal(id, "Restart requested");
-        return RetryJob(id);
+        lock (_raceAnnounceLock)
+        {
+            if (_raceMutations.Contains(id)) return false;
+            var existing = _store.Job(id);
+            if (existing is null) return false;
+            if (!existing.Terminal) CancelJobInternal(id, "Restart requested");
+            return RetryJob(id);
+        }
     }
 
     public int ClearLogs()
@@ -713,6 +745,8 @@ public sealed partial class WeaveEngine
 
     private static async Task DeleteRemoteTreeAsync(FtpClient client, string path, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        if (!SafeRacePath(path, relative: false, out path)) throw new IOException("unsafe remote deletion path");
         var (deleteCode, deleteMsg) = await client.CommandAsync("DELE " + path).ConfigureAwait(false);
         if (deleteCode / 100 == 2)
             return;
@@ -722,23 +756,27 @@ public sealed partial class WeaveEngine
             var entries = await client.ListAsync(path, ct).ConfigureAwait(false);
             foreach (var entry in entries)
             {
+                ct.ThrowIfCancellationRequested();
                 if (entry.Name is "." or "..") continue;
+                if (entry.Name.IndexOfAny(new[] { '/', '\\' }) >= 0 || entry.Name.Any(char.IsControl))
+                    throw new ArgumentException("unsafe directory entry in deletion listing");
                 var child = FtpClient.JoinRemote(path, entry.Name);
-                if (entry.Type is "dir" or "link")
+                if (entry.Type == "dir")
                     await DeleteRemoteTreeAsync(client, child, ct).ConfigureAwait(false);
                 else
                 {
-                    var (childCode, _) = await client.CommandAsync("DELE " + child).ConfigureAwait(false);
+                    var (childCode, childMessage) = await client.CommandAsync("DELE " + child).ConfigureAwait(false);
                     if (childCode / 100 != 2)
-                        await DeleteRemoteTreeAsync(client, child, ct).ConfigureAwait(false);
+                        throw new ArgumentException($"cannot unlink {child}: {childCode} {FirstLineOf(childMessage)}");
                 }
             }
         }
-        catch
+        catch (IOException)
         {
             // Some servers refuse LIST on special dirs; RMD below will surface the useful error.
         }
 
+        ct.ThrowIfCancellationRequested();
         var (removeCode, removeMsg) = await client.CommandAsync("RMD " + path).ConfigureAwait(false);
         if (removeCode / 100 == 2)
             return;
@@ -788,6 +826,58 @@ public sealed partial class WeaveEngine
 
     public Task<RawCommandResult> SendRawCommandAsync(string siteName, string command, CancellationToken ct = default) =>
         SendRawCommandAsync(siteName, command, "", ct);
+
+    // cbftp's nuke screen: one login, then per dir CWD into its parent and
+    // "SITE NUKE <dir> <multiplier> <reason>". The relative dir name is the documented
+    // glftpd/drftpd form and also works through symlinked section paths.
+    public async Task<List<NukeResult>> NukeAsync(string siteName, IReadOnlyList<string> paths, int multiplier,
+        string reason, CancellationToken ct = default)
+    {
+        siteName = (siteName ?? "").Trim();
+        reason = (reason ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(siteName)) throw new ArgumentException("site is required");
+        if (paths is null || paths.Count == 0) throw new ArgumentException("nothing selected to nuke");
+        if (reason.Length == 0) throw new ArgumentException("a nuke reason is required");
+        if (reason.Contains('\r') || reason.Contains('\n')) throw new ArgumentException("the reason must be a single line");
+        if (multiplier is < 0 or > 100) throw new ArgumentException("the multiplier must be 0-100");
+        var site = _store.Site(siteName) ?? throw new IOException($"site \"{siteName}\": not found");
+        using var client = await FtpClient.DialAndLoginAsync(FtpConfig(site), ct).ConfigureAwait(false);
+        var results = new List<NukeResult>();
+        foreach (var raw in paths)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!SafeRacePath(raw, relative: false, out var path))
+            {
+                results.Add(new NukeResult { Path = raw ?? "", Message = "unsafe directory path" });
+                continue;
+            }
+            var name = RemoteBase(path);
+            if (name.Length == 0 || name.Contains(' '))
+            {
+                results.Add(new NukeResult { Path = path, Message = name.Length == 0 ? "refusing to nuke the root" : "dir names with spaces cannot be nuked" });
+                continue;
+            }
+            try
+            {
+                var (cwdCode, cwdMsg) = await client.CommandAsync("CWD " + RemoteParentPath(path)).ConfigureAwait(false);
+                if (cwdCode / 100 != 2)
+                {
+                    results.Add(new NukeResult { Path = path, Code = cwdCode, Message = "CWD failed: " + cwdMsg.Trim() });
+                    continue;
+                }
+                var (code, msg) = await client.CommandAsync($"SITE NUKE {name} {multiplier} {reason}").ConfigureAwait(false);
+                var ok = code / 100 == 2;
+                results.Add(new NukeResult { Path = path, Code = code, Message = msg.Trim(), Ok = ok });
+                Log("system", siteName, ok ? "info" : "warn", $"nuke {path} x{multiplier} \"{reason}\": {code}");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                results.Add(new NukeResult { Path = path, Message = FirstLineOf(ex.Message) });
+                break; // the control connection is gone; the rest would fail the same way
+            }
+        }
+        return results;
+    }
 
     public async Task<RawCommandResult> SendRawCommandAsync(string siteName, string command, string logAlias, CancellationToken ct = default)
     {
@@ -947,19 +1037,45 @@ public sealed partial class WeaveEngine
 
     public Job StartFxp(TransferRequest req, bool queueOnly = false)
     {
-        var job = CreateTransferJob(req);
-        var run = RegisterJobToken(job.Id);
-        if (queueOnly) PauseJob(job.Id);
-        _ = ScheduleTransfer(job.Id, req, run);
-        return _store.Job(job.Id)!;
+        lock (_raceAnnounceLock)
+        {
+            if (req.Race && req.ViaApi && !queueOnly && FindActiveApiRace(req) is { } active) return active;
+            if (req.Race) EnsurePreRouteAllows(req);
+            var job = CreateTransferJob(req);
+            var run = RegisterJobToken(job.Id);
+            if (queueOnly) PauseJob(job.Id);
+            HoldForGlobalStop(job.Id);
+            _ = ScheduleTransfer(job.Id, req, run);
+            return _store.Job(job.Id)!;
+        }
     }
 
-    public SpreadResult StartSpread(SpreadRequest req)
+    public SpreadResult StartSpread(SpreadRequest req, bool queueOnly = false)
     {
-        var result = CreateSpread(req);
-        _ = req.Race ? Task.Run(() => RunSpreadAsync(result.Jobs, result.MaxParallel))
-            : RunSpreadAsync(result.Jobs, result.MaxParallel);
-        return result;
+        lock (_raceAnnounceLock)
+        {
+            // Pre routing rewrites source/targets first, so a repeated announce of the
+            // same pre matches the already-running (rewritten) race below.
+            var preNote = req.Race ? ApplyPreRouting(req) : null;
+            // cbftp appends to an active spread instead of launching duplicate listers.
+            // Coalesce exact API repeats; different routes, paths and source-only scopes remain separate.
+            if (req.Race && req.ViaApi && FindActiveApiRace(SpreadRaceIdentity(req)) is { } active)
+                return new SpreadResult { BatchId = active.BatchId, MaxParallel = 1, Jobs = new() { active } };
+            var result = CreateSpread(req);
+            if (preNote is not null)
+            {
+                Log("transfer", req.FromSite, "info", $"{req.Label}: {preNote}");
+                foreach (var job in result.Jobs) LogJob(job.Id, "info", preNote);
+            }
+            foreach (var job in result.Jobs)
+            {
+                if (queueOnly) PauseJob(job.Id);
+                HoldForGlobalStop(job.Id);
+            }
+            _ = req.Race ? Task.Run(() => RunSpreadAsync(result.Jobs, result.MaxParallel))
+                : RunSpreadAsync(result.Jobs, result.MaxParallel);
+            return result;
+        }
     }
 
     private Job CreateTransferJob(TransferRequest req)
@@ -977,6 +1093,7 @@ public sealed partial class WeaveEngine
             toSite = _store.Site(req.ToSite) ?? throw new IOException($"to_site \"{req.ToSite}\": not found");
             if (fromSite.BlockTransferFrom) throw new IOException($"site \"{req.FromSite}\" blocks transfers FROM it");
             if (toSite.BlockTransferTo) throw new IOException($"site \"{req.ToSite}\" blocks transfers TO it");
+            EnsureTransferAllowed(req);
         }
         var now = DateTime.UtcNow;
         var job = new Job
@@ -999,11 +1116,13 @@ public sealed partial class WeaveEngine
     // blocks (allowupload/allowdownload = NO) first, then the policy+exception model
     // from BOTH sides (source's target policy and destination's source policy).
     public bool TransferAllowed(Site src, Site dst)
+        => src.AllowDownload && dst.AllowUpload && src.CanTransferTo(dst);
+
+    private void EnsureTransferAllowed(TransferRequest req)
     {
-        if (src.BlockTransferFrom || dst.BlockTransferTo) return false;
-        if (!src.IsAllowedTargetSite(dst.Name)) return false;
-        if (!dst.IsAllowedSourceSite(src.Name)) return false;
-        return true;
+        if ((req.DownloadOnlySites ?? new()).Contains(req.ToSite, StringComparer.OrdinalIgnoreCase) ||
+            !_store.TransferAllowed(req.FromSite, req.ToSite, req.Race))
+            throw new IOException($"route {req.FromSite} -> {req.ToSite} is blocked by current site transfer settings");
     }
 
     private SpreadResult CreateSpread(SpreadRequest req)
@@ -1036,7 +1155,8 @@ public sealed partial class WeaveEngine
             var hasRoute = false;
             foreach (var src in sites)
                 foreach (var dst in sites)
-                    if (!src.Name.Equals(dst.Name, StringComparison.OrdinalIgnoreCase) && TransferAllowed(src, dst))
+                    if (!src.Name.Equals(dst.Name, StringComparison.OrdinalIgnoreCase) &&
+                        !(req.DownloadOnlySites ?? new()).Contains(dst.Name, StringComparer.OrdinalIgnoreCase) && TransferAllowed(src, dst))
                         hasRoute = true;
             if (!hasRoute) throw new IOException("spread has no eligible site routes (check block transfer to/from on the sites)");
 
@@ -1052,6 +1172,8 @@ public sealed partial class WeaveEngine
                 DestPath = SitePath(names.First(n => !n.Equals(req.FromSite, StringComparison.OrdinalIgnoreCase)), req.DestPath),
                 MeshSites = names,
                 SitePaths = new Dictionary<string, string>(req.SitePaths, StringComparer.OrdinalIgnoreCase),
+                DownloadOnlySites = (req.DownloadOnlySites ?? new()).ToList(),
+                PreFirstTargets = (req.PreFirstTargets ?? new()).ToList(),
                 Race = true,
                 DryRun = req.DryRun,
                 ViaApi = req.ViaApi,
@@ -1072,6 +1194,7 @@ public sealed partial class WeaveEngine
                     ToSite = target,
                     SourcePath = SitePath(req.FromSite, req.SourcePath),
                     DestPath = SitePath(target, req.DestPath),
+                    DownloadOnlySites = (req.DownloadOnlySites ?? new()).ToList(),
                     Race = req.Race,
                     DryRun = req.DryRun,
                     ViaApi = req.ViaApi,
@@ -1103,59 +1226,38 @@ public sealed partial class WeaveEngine
             await Task.WhenAll(jobs.Select(job => ScheduleTransfer(job.Id, job.Request, RegisterJobToken(job.Id), batch))).ConfigureAwait(false);
             return;
         }
-        using var sem = new SemaphoreSlim(maxParallel);
         using var raceStop = new CancellationTokenSource();
+        var raceBatch = new ManualTransferQueue.Limit("batch:" + jobs[0].BatchId, maxParallel);
         var tasks = jobs.Select(async job =>
         {
-            var entered = false;
-            try
+            var run = RegisterJobToken(job.Id);
+            var stopRace = await ScheduleTransfer(job.Id, job.Request, run, raceBatch, batchToken: raceStop.Token).ConfigureAwait(false);
+            if (stopRace && !raceStop.IsCancellationRequested)
             {
-                await sem.WaitAsync(raceStop.Token).ConfigureAwait(false);
-                entered = true;
-                if (raceStop.IsCancellationRequested)
-                {
-                    CancelJobInternal(job.Id, "race batch stopped after completion marker");
-                    return;
-                }
-
-                var run = RegisterJobToken(job.Id);
-                using var jobLinked = CancellationTokenSource.CreateLinkedTokenSource(raceStop.Token, run.Token);
-                ArmJobWatchdog(job.Id, run);
-                var stopRace = await RunTransferJobAsync(job.Id, job.Request, jobLinked.Token, run).ConfigureAwait(false);
-                if (stopRace && job.Request.Race && !raceStop.IsCancellationRequested)
-                {
-                    Log("transfer", job.BatchId, "info", "race batch stopped after completion marker");
-                    raceStop.Cancel();
-                }
-            }
-            catch (OperationCanceledException) when (raceStop.IsCancellationRequested)
-            {
-                CancelJobInternal(job.Id, "race batch stopped after completion marker");
-            }
-            finally
-            {
-                if (entered) sem.Release();
+                Log("transfer", job.BatchId, "info", "race batch stopped after completion marker");
+                raceStop.Cancel();
             }
         });
         await Task.WhenAll(tasks).ConfigureAwait(false);
     }
 
-    private async Task<bool> RunTransferJobAsync(string id, TransferRequest req, CancellationToken ct, JobRunControl run)
+    private async Task<bool> RunTransferJobAsync(string id, TransferRequest req, CancellationToken ct, JobRunControl run,
+        RaceRunPermit? racePermit = null)
     {
         LogJob(id, "info", "job started");
         _store.UpdateJob(id, j => { j.State = JobState.Running; j.StartedAt = DateTime.UtcNow; });
         NotifyChanged();
 
-        if (req.DryRun)
-        {
-            LogJob(id, "info", "dry run completed without connecting to FTP sites");
-            FinishJob(id, null, run);
-            return false;
-        }
-
         try
         {
             ct.ThrowIfCancellationRequested();
+            await WaitWhilePausedAsync(id, ct).ConfigureAwait(false);
+            if (req.DryRun)
+            {
+                LogJob(id, "info", "dry run completed without connecting to FTP sites");
+                FinishJob(id, null, run);
+                return false;
+            }
             // NOTE: no "is the destination already complete?" probe here. On an announce
             // race those round trips are pure delay at the most latency-critical moment
             // The race loop checks completion once
@@ -1163,43 +1265,14 @@ public sealed partial class WeaveEngine
 
             if (req.Race)
             {
-                // The global scoreboard exists to arbitrate 3+ sites sharing pools. For a
-                // straight server-to-server race it only adds scheduling latency: the old
-                // directional loop borrows the shared pools directly and starts files with
-                // no cross-race coordination, which is what wins the announce. Keep the
-                // mesh+scoreboard for 3+ sites; take the lean path for one source→one dest.
-                if (req.MeshSites.Count > 2)
-                {
-                    var meshComplete = await RunMeshRaceLoopAsync(id, req, ct).ConfigureAwait(false);
-                    FinishJob(id, meshComplete ? null : new IOException("mesh race stopped idle before completion"), run);
-                    return meshComplete;
-                }
-
-                // 2-site job comes in as a mesh request (ToSite = "mesh"); resolve the real
-                // destination out of MeshSites so the directional loop and its config labels
-                // point at the right box.
-                if (req.MeshSites.Count == 2 && (string.IsNullOrWhiteSpace(req.ToSite) || req.ToSite.Equals("mesh", StringComparison.OrdinalIgnoreCase)))
-                {
-                    var dstName = req.MeshSites.FirstOrDefault(n => !n.Equals(req.FromSite, StringComparison.OrdinalIgnoreCase));
-                    if (!string.IsNullOrWhiteSpace(dstName))
-                    {
-                        req.ToSite = dstName;
-                        if (req.SitePaths.TryGetValue(dstName, out var dstPath) && !string.IsNullOrWhiteSpace(dstPath))
-                            req.DestPath = dstPath;
-                    }
-                }
-
-                var raceSrc = _store.Site(req.FromSite) ?? throw new IOException($"from_site \"{req.FromSite}\": not found");
-                var raceDst = _store.Site(req.ToSite) ?? throw new IOException($"to_site \"{req.ToSite}\": not found");
-                // Real racer: keep re-listing the source and moving new files as they land,
-                // best-scored first, until the release is complete or the source goes idle.
-                var raceResult = await RunRaceLoopAsync(id, req, raceSrc, raceDst, ct).ConfigureAwait(false);
-                FinishJob(id, raceResult.Complete ? null : new IOException(raceResult.Reason), run);
-                return raceResult.Complete;
+                var result = await RunRaceWithRetriesAsync(id, req, ct, racePermit!).ConfigureAwait(false);
+                FinishJob(id, result.Complete ? null : new IOException(result.Reason), run);
+                return result.Complete;
             }
 
             var fxpSrc = _store.Site(req.FromSite) ?? throw new IOException($"from_site \"{req.FromSite}\": not found");
             var fxpDst = _store.Site(req.ToSite) ?? throw new IOException($"to_site \"{req.ToSite}\": not found");
+            EnsureTransferAllowed(req);
             await FxpTransfer.TransferAsync(FtpConfig(fxpSrc, "", !req.ViaApi), FtpConfig(fxpDst, "", !req.ViaApi), req,
                 (level, message) => LogJob(id, level, message), ct,
                 onFilesFound: n =>
@@ -1235,6 +1308,70 @@ public sealed partial class WeaveEngine
         }
     }
 
+    private readonly record struct RaceLoopResult(bool Complete, string Reason, bool Retry = true);
+
+    private async Task<RaceLoopResult> RunRaceWithRetriesAsync(
+        string id, TransferRequest req, CancellationToken ct, RaceRunPermit permit)
+    {
+        var settings = _store.Settings();
+        var retries = settings.IncompleteRaceRetries;
+        for (var pass = 0; ; pass++)
+        {
+            ct.ThrowIfCancellationRequested();
+            await WaitWhilePausedAsync(id, ct).ConfigureAwait(false);
+            await permit.AcquireAsync().ConfigureAwait(false);
+            RaceLoopResult result;
+            using var passStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            Exception? storageError = null;
+            void StorageFailed(Exception error)
+            {
+                Interlocked.CompareExchange(ref storageError, error, null);
+                passStop.Cancel();
+            }
+            try
+            {
+                // Two-site meshes remain bidirectional and use the shared scoreboard.
+                if (req.MeshSites.Count > 1)
+                    result = await RunMeshRaceLoopAsync(id, req, passStop.Token, StorageFailed).ConfigureAwait(false);
+                else
+                {
+                    var src = _store.Site(req.FromSite) ?? throw new IOException($"from_site \"{req.FromSite}\": not found");
+                    var dst = _store.Site(req.ToSite) ?? throw new IOException($"to_site \"{req.ToSite}\": not found");
+                    result = await RunRaceLoopAsync(id, req, src, dst, passStop.Token, StorageFailed, retry: pass > 0).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (storageError is not null && !ct.IsCancellationRequested)
+            {
+                result = new(false, "");
+            }
+            finally { permit.Release(); }
+            if (storageError is not null && !ct.IsCancellationRequested)
+                return new(false, $"race stopped: insufficient server storage; retry after freeing space ({FirstLineOf(storageError.Message)})", false);
+            ct.ThrowIfCancellationRequested();
+            if (req.MeshSites.Count <= 1 && !_store.TransferAllowed(req.FromSite, req.ToSite, race: true))
+                return new(false, $"route {req.FromSite} -> {req.ToSite} is blocked by current site transfer settings");
+            if (result.Complete) return result;
+            _store.UpdateJobTransient(id, j => { if (!j.Terminal) j.State = JobState.Queued; });
+            NotifyChangedThrottled();
+            if (!result.Retry || pass >= retries)
+            {
+                // Workers have stopped. Reconcile late opponent uploads without
+                // restarting STOR attempts against occupied destinations.
+                if (await WaitForRaceCompletionAsync(id, req,
+                    result.Retry ? 0 : settings.RaceCompletionRecheckSeconds, ct).ConfigureAwait(false))
+                    return new(true, "");
+                return result;
+            }
+
+            // The previous loop has released its workers and transfer reservations.
+            // Keep this job/run so cancellation, the watchdog and history still agree.
+            ClearProgress(id);
+            _store.UpdateJobTransient(id, j => { j.SpeedBps = 0; j.CurrentFile = ""; j.Slots.Clear(); });
+            LogJob(id, "warn", $"incomplete race: retry {pass + 1}/{retries} in {settings.IncompleteRaceRetryDelaySeconds}s ({result.Reason})");
+            await Task.Delay(TimeSpan.FromSeconds(settings.IncompleteRaceRetryDelaySeconds), ct).ConfigureAwait(false);
+        }
+    }
+
     // ---- race loop --------------------------------------------------------------------
     // Keep re-listing the source and moving newly-appeared files,
     // best-scored first (sfv/nfo first, then biggest), with per-file retry + backoff,
@@ -1258,7 +1395,7 @@ public sealed partial class WeaveEngine
         public required string Path { get; init; }
         public required FtpClient.Config Config { get; init; }
         public required SitePool Pool { get; init; }
-        public required List<string> Skiplist { get; init; }
+        public required List<SkiplistEntry> Skiplist { get; init; }
         public Dictionary<string, RaceFile> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
         // Recent successful transfers protect against an overlapping older LIST.
         // They never bypass the current listed size or a later missing-file result.
@@ -1269,6 +1406,8 @@ public sealed partial class WeaveEngine
         public bool Listed { get; set; }
         public long ListVersion { get; set; } = -1;
         public bool CompletionSeen { get; set; }
+        public bool RootMissing { get; set; }
+        public bool ListingFailed { get; set; }
     }
 
     private readonly struct MeshPick
@@ -1311,9 +1450,50 @@ public sealed partial class WeaveEngine
         }
     }
 
+    // A following download can finish far larger than its original LIST entry.
+    // Probe only after BOTH final FTP replies; metadata failure never retries 226 data.
+    internal static async Task<(long Size, bool Verified, bool Reusable)> CompletedFxpSizeAsync(
+        FtpClient destination, string name, long listedSize, CancellationToken ct)
+    {
+        var fallback = Math.Max(0, listedSize);
+        Task<long>? pending = null;
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            // TransferSingleAsync already CWD'd this connection into the target dir.
+            pending = destination.SizeAsync(name);
+            var size = await pending.WaitAsync(TimeSpan.FromMilliseconds(250), ct).ConfigureAwait(false);
+            return size >= 0 ? (size, true, true) : (fallback, false, true);
+        }
+        catch
+        {
+            // A late 213 must never be read as the next transfer's preliminary reply.
+            destination.Dispose();
+            if (pending is not null)
+                _ = pending.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            return (fallback, false, false);
+        }
+    }
+
+    // RETR EOF plus a verified destination SIZE supersedes the source's growing
+    // LIST hint. Give that same old hint a bounded chance to catch up; a different
+    // size immediately remains new evidence (including a corrected/shrunk file).
+    private static RaceFile ReconcileFollowedSourceListing(
+        Dictionary<string, (long Listed, long Final, DateTime Until)> hints, string key, RaceFile file)
+    {
+        if (!hints.TryGetValue(key, out var hint)) return file;
+        if (file.Size != hint.Listed || DateTime.UtcNow >= hint.Until)
+        {
+            hints.Remove(key);
+            return file;
+        }
+        return new RaceFile(file.Abs, file.Rel, file.Name, file.ParentRel, hint.Final);
+    }
+
     private sealed class Attempt { public int Count; public long LastFailMs; }
 
-    private async Task<bool> RunMeshRaceLoopAsync(string id, TransferRequest req, CancellationToken ct)
+    private async Task<RaceLoopResult> RunMeshRaceLoopAsync(string id, TransferRequest req, CancellationToken ct, Action<Exception> storageFailed)
     {
         var settings = _store.Settings();
         var pollMs = settings.RacePollIntervalMs;
@@ -1345,9 +1525,11 @@ public sealed partial class WeaveEngine
                 Path = PathOn(name),
                 Config = cfg,
                 Pool = AcquirePool(name, site, cfg),
-                Skiplist = MergePatternLists(settings.GlobalSkiplist, site.Skiplist),
+                Skiplist = MergeSkiplists(settings.GlobalSkiplist, site.Skiplist),
             });
         }
+        // Unique skiplist rules: one match per destination directory for this race.
+        SkiplistUniqueState skipUnique = new();
 
         try
         {
@@ -1370,11 +1552,15 @@ public sealed partial class WeaveEngine
             var attemptLogNotBefore = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
             var scheduledByDestination = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var scoreboard = new MeshScoreboard<MeshPick>();
+            var raceProgress = new RaceProgressPublisher(_store, id);
+            var manifest = new RaceManifestPublisher(_store, id);
+            var followedSourceHints = new Dictionary<string, (long Listed, long Final, DateTime Until)>(StringComparer.OrdinalIgnoreCase);
             var dirtyFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var scoreboardChanged = true;
             var nextScoreboardRefresh = DateTime.MinValue;
             var knownSizes = new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             var expectedFromSfv = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var sfvExcludesSingleByte = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var parsedSfvSizes = new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             var sfvReads = new ConcurrentDictionary<string, Task>(StringComparer.OrdinalIgnoreCase);
             var nextSfvRead = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
@@ -1396,9 +1582,13 @@ public sealed partial class WeaveEngine
             var idleCycles = 0;
             DateTime? idleSince = null;
             var idleTimeout = RaceIdleTimeout(maxIdle, pollMs);
+            var quietCompletion = new RaceQuietCompletion(idleTimeout);
+            long idleVersion = -1;
+            var incompleteReason = "mesh race stopped idle before completion";
+            var retryIncomplete = true;
             var poll = 0;
-            var sentCount = 0;
-            long cumulative = 0;
+            var sentCount = _store.JobHeader(id)?.FilesDone ?? 0;
+            long cumulative = _store.JobHeader(id)?.CumulativeBytes ?? 0;
             var recentTransfers = new List<(DateTime Start, DateTime End, long Size)>();
             var speedLock = new object();
             const double SpeedWindowSecs = 5.0;
@@ -1467,9 +1657,12 @@ public sealed partial class WeaveEngine
                         {
                             var rel = string.IsNullOrEmpty(sfvFile.ParentRel) ? file.Name : sfvFile.ParentRel + "/" + file.Name;
                             if (expectedFromSfv.Add(rel)) added++;
+                            if (SfvExcludesSingleByte(file.Crc)) sfvExcludesSingleByte.Add(rel);
+                            else sfvExcludesSingleByte.Remove(rel);
                         }
                         evidenceVersion++;
                     }
+                    manifest.Register(sfvFile.Rel, sfvFile.ParentRel, parsed);
                     parsedSfvSizes[sfvFile.Rel] = sfvFile.Size;
                     if (added > 0)
                     {
@@ -1493,7 +1686,7 @@ public sealed partial class WeaveEngine
             void QueueSfvRead(MeshSiteCtx ctx, RaceFile sfvFile)
             {
                 if (!sfvFile.Name.EndsWith(".sfv", StringComparison.OrdinalIgnoreCase)) return;
-                if (parsedSfvSizes.TryGetValue(sfvFile.Rel, out var parsedSize) && parsedSize >= sfvFile.Size) return;
+                if (parsedSfvSizes.TryGetValue(sfvFile.Rel, out var parsedSize) && parsedSize == sfvFile.Size) return;
                 var key = sfvFile.Rel;
                 if (nextSfvRead.TryGetValue(key, out var retryAt) && retryAt > DateTime.UtcNow) return;
                 sfvReads.GetOrAdd(key, _ => ReadAndParseSfvAsync(ctx, sfvFile, key));
@@ -1501,9 +1694,10 @@ public sealed partial class WeaveEngine
 
             bool RouteAllowed(MeshSiteCtx src, MeshSiteCtx dst)
             {
-                if (src.Name.Equals(dst.Name, StringComparison.OrdinalIgnoreCase)) return false;
-                if (!src.Site.AllowDownload || !dst.Site.AllowUpload) return false;
-                return TransferAllowed(src.Site, dst.Site);
+                if (src.Name.Equals(dst.Name, StringComparison.OrdinalIgnoreCase) ||
+                    (req.DownloadOnlySites ?? new()).Contains(dst.Name, StringComparer.OrdinalIgnoreCase)) return false;
+                if (IsRemovedFromRace(id, src.Name) || IsRemovedFromRace(id, dst.Name)) return false; // race action
+                return _store.TransferAllowed(src.Name, dst.Name, race: true);
             }
 
             bool IsIngressBiasedDestination(MeshSiteCtx dst)
@@ -1511,10 +1705,8 @@ public sealed partial class WeaveEngine
                 foreach (var peer in contexts)
                 {
                     if (peer.Name.Equals(dst.Name, StringComparison.OrdinalIgnoreCase)) continue;
-                    var canReceiveFromPeer = peer.Site.AllowDownload && dst.Site.AllowUpload &&
-                        TransferAllowed(peer.Site, dst.Site);
-                    var canSendToPeer = dst.Site.AllowDownload && peer.Site.AllowUpload &&
-                        TransferAllowed(dst.Site, peer.Site);
+                    var canReceiveFromPeer = RouteAllowed(peer, dst);
+                    var canSendToPeer = RouteAllowed(dst, peer);
                     if (canReceiveFromPeer && !canSendToPeer) return true;
                 }
                 return false;
@@ -1522,9 +1714,9 @@ public sealed partial class WeaveEngine
 
             string RouteKey(MeshPick pick) => pick.Src.Name + "|" + pick.Dst.Name + "|" + pick.File.Rel;
 
-            var allowedDestinations = contexts.ToDictionary(src => src,
-                src => contexts.Where(dst => RouteAllowed(src, dst)).ToList());
-            var ingressBias = contexts.ToDictionary(dst => dst, dst => IsIngressBiasedDestination(dst) ? 2_000_000L : 0L);
+            var allowedDestinations = contexts.ToDictionary(src => src, _ => new List<MeshSiteCtx>());
+            var ingressBias = contexts.ToDictionary(dst => dst, _ => 0L);
+            long routeRevision = -1;
 
             void RefreshCandidates()
             {
@@ -1534,11 +1726,12 @@ public sealed partial class WeaveEngine
                     var size = knownSizes.TryGetValue(rel, out var knownSize) ? knownSize : 0;
                     foreach (var src in contexts)
                     {
-                        if (!src.Files.TryGetValue(rel, out var file) || IsUnreadableSfv(file) || !HasComplete(src, rel, size)) continue;
+                        if (src.ListingFailed || !src.Files.TryGetValue(rel, out var file) || IsUnreadableSfv(file) || !HasComplete(src, rel, size)) continue;
                         foreach (var dst in allowedDestinations[src])
                         {
-                            if (!dst.Listed || HasComplete(dst, rel, size)) continue;
-                            if (SkiplistMatches(FtpClient.JoinRemote(dst.Path, rel), file.Name, dst.Skiplist)) continue;
+                            if (dst.ListingFailed || (!dst.Listed && !dst.RootMissing) || HasComplete(dst, rel, size)) continue;
+                            if (SkiplistRules.Blocks(dst.Skiplist, rel)) continue;
+                            if (SkiplistRules.UniqueBlocks(dst.Skiplist, rel, dst.Files.Keys, skipUnique, dst.Name)) continue;
                             // Route speed can outweigh a small size difference, but never SFV/NFO priority.
                             var score = RaceScore(file.Name) * 1_000_000_000L +
                                 Math.Min(999, Math.Max(0, file.Size / 1024 / 1024)) * 100_000L +
@@ -1553,33 +1746,56 @@ public sealed partial class WeaveEngine
 
             bool CoveredForReachableMesh((string Rel, long Size) file)
             {
+                var sizeContradictsSfv = file.Size == 1 && sfvExcludesSingleByte.Contains(file.Rel);
                 foreach (var dst in contexts)
                 {
-                    if (SkiplistMatches(FtpClient.JoinRemote(dst.Path, file.Rel), RemoteBase(file.Rel), dst.Skiplist)) continue;
-                    if (HasComplete(dst, file.Rel, file.Size)) continue;
+                    if (SkiplistRules.Blocks(dst.Skiplist, file.Rel) ||
+                        SkiplistRules.UniqueSatisfied(dst.Skiplist, file.Rel, dst.Files.Keys, skipUnique, dst.Name)) continue;
+                    if (!sizeContradictsSfv && HasComplete(dst, file.Rel, file.Size)) continue;
                     if (contexts.Any(src => RouteAllowed(src, dst))) return false;
                 }
                 return true;
             }
 
+            void PublishManifest(bool force = false)
+            {
+                if (!force && !manifest.Due) return;
+                RaceManifestObservation[] rows;
+                lock (sync)
+                {
+                    var listed = contexts.Where(c => !IsRemovedFromRace(id, c.Name)).All(c => c.Listed && !c.ListingFailed);
+                    rows = expectedFromSfv.Select(rel =>
+                    {
+                        knownSizes.TryGetValue(rel, out var size);
+                        bool? covered = listed ? CoveredForReachableMesh((rel, size)) : null;
+                        var available = contexts.Any(c => !c.ListingFailed && c.Site.AllowDownload &&
+                            c.Files.TryGetValue(rel, out var file) && file.Size > 0);
+                        return new RaceManifestObservation(rel, size > 0 ? size : null, covered, available);
+                    }).ToArray();
+                }
+                manifest.Publish(rows);
+            }
+
             bool HasMeshWorkOutstanding(List<(string Rel, long Size)> known)
             {
-                if (contexts.Any(c => c.PendingDupes.Count > 0)) return true;
                 var now = DateTime.UtcNow;
                 var nowMs = (now - started).TotalMilliseconds;
                 foreach (var f in known)
                 {
                     foreach (var src in contexts)
                     {
-                        if (!HasComplete(src, f.Rel, f.Size)) continue;
+                        if (src.ListingFailed || !HasComplete(src, f.Rel, f.Size)) continue;
                         foreach (var dst in contexts)
                         {
-                            if (!dst.Listed) return true;
                             if (!RouteAllowed(src, dst)) continue;
-                            if (SkiplistMatches(FtpClient.JoinRemote(dst.Path, f.Rel), RemoteBase(f.Rel), dst.Skiplist)) continue;
+                            if (dst.ListingFailed) continue;
+                            if (!dst.Listed && !dst.RootMissing) return true;
+                            if (SkiplistRules.Blocks(dst.Skiplist, f.Rel) ||
+                                SkiplistRules.UniqueSatisfied(dst.Skiplist, f.Rel, dst.Files.Keys, skipUnique, dst.Name)) continue;
                             if (HasComplete(dst, f.Rel, f.Size)) continue;
                             var key = f.Rel + "|" + dst.Name;
-                            if (inFlight.Contains(key) || dst.PendingDupes.ContainsKey(f.Rel)) return true;
+                            if (inFlight.Contains(key)) return true;
+                            if (dst.PendingDupes.ContainsKey(f.Rel)) continue;
                             var routeKey = src.Name + "|" + dst.Name + "|" + f.Rel;
                             lock (attemptsLock)
                             {
@@ -1601,14 +1817,19 @@ public sealed partial class WeaveEngine
                 {
                     var now = DateTime.UtcNow;
                     var nowMs = (now - started).TotalMilliseconds;
-                    foreach (var site in contexts)
-                        foreach (var rel in site.PendingDupes.Where(x => x.Value.RetryAt <= now).Select(x => x.Key).ToList())
-                        {
-                            site.PendingDupes.Remove(rel);
-                            site.Files.Remove(rel); // retry an abandoned upload; never trust its old partial listing
-                            site.Confirmed.Remove(rel);
-                            dirtyFiles.Add(rel);
-                        }
+                    var currentRevision = unchecked(_store.SiteRevision * 1_000_003L + Interlocked.Read(ref _raceRouteVersion));
+                    if (routeRevision != currentRevision)
+                    {
+                        routeRevision = currentRevision;
+                        foreach (var src in contexts)
+                            allowedDestinations[src] = contexts.Where(dst => RouteAllowed(src, dst)).ToList();
+                        foreach (var dst in contexts)
+                            ingressBias[dst] = (IsIngressBiasedDestination(dst) ? 2_000_000L : 0L) +
+                                PriorityBias((_store.Site(dst.Name) ?? dst.Site).Priority) +
+                                ((req.PreFirstTargets ?? new()).Contains(dst.Name, StringComparer.OrdinalIgnoreCase) ? PreFirstBias : 0L);
+                        dirtyFiles.UnionWith(contexts.SelectMany(c => c.Files.Keys));
+                        scoreboardChanged = true;
+                    }
                     if (scoreboardChanged || dirtyFiles.Count > 0 || now >= nextScoreboardRefresh)
                     {
                         RefreshCandidates();
@@ -1619,6 +1840,7 @@ public sealed partial class WeaveEngine
                         foreach (var candidate in scoreboard.Ordered)
                         {
                             var pick = candidate.Pick;
+                            if (!RouteAllowed(pick.Src, pick.Dst)) continue;
                             var key = pick.File.Rel + "|" + pick.Dst.Name;
                             var routeKey = RouteKey(pick);
                             if (inFlight.Contains(key) || pick.Dst.PendingDupes.ContainsKey(pick.File.Rel)) continue;
@@ -1644,7 +1866,7 @@ public sealed partial class WeaveEngine
                             runnable.Add(new GlobalMeshScoreboard<MeshPick>.Candidate(pick, score,
                                 pick.Dst.Name + "|" + FtpClient.JoinRemote(pick.Dst.Path, pick.File.Rel),
                                 pick.Src.Pool, pick.Dst.Pool,
-                                () => pick.Src.Pool.CanBorrowTransfer(id, true) && pick.Dst.Pool.CanBorrowTransfer(id, false),
+                                () => RouteAllowed(pick.Src, pick.Dst) && pick.Src.Pool.CanBorrowTransfer(id, true) && pick.Dst.Pool.CanBorrowTransfer(id, false),
                                 () => MeshPairReservation.TryCreate(id, pick),
                                 () => pick.Src.Pool.FreeTransferSlots(true),
                                 () => pick.Dst.Pool.FreeTransferSlots(false)));
@@ -1678,10 +1900,18 @@ public sealed partial class WeaveEngine
                 if (requeue) workSignal.Release();
             }
 
-            void RecordSuccess(MeshPick pick, DateTime startedAt)
+            void RecordSuccess(MeshPick pick, DateTime startedAt, long listedSize, bool verifiedSize)
             {
                 lock (sync)
                 {
+                    if (verifiedSize && pick.File.Size > listedSize &&
+                        pick.Src.Files.TryGetValue(pick.File.Rel, out var sourceFile) && sourceFile.Size == listedSize)
+                    {
+                        followedSourceHints[pick.Src.Name + "|" + pick.File.Rel] = (listedSize, pick.File.Size, DateTime.UtcNow.AddSeconds(5));
+                        pick.Src.Files[pick.File.Rel] = new RaceFile(sourceFile.Abs, sourceFile.Rel, sourceFile.Name, sourceFile.ParentRel, pick.File.Size);
+                        knownSizes[pick.File.Rel] = contexts.Where(c => c.Site.AllowDownload)
+                            .Select(c => c.Files.TryGetValue(pick.File.Rel, out var file) ? file.Size : 0).DefaultIfEmpty().Max();
+                    }
                     // Now present on dst with the real size, so it can feed onward to a
                     // third site, and is confirmed complete.
                     pick.Dst.Files[pick.File.Rel] = new RaceFile(
@@ -1717,8 +1947,19 @@ public sealed partial class WeaveEngine
             async Task ListerAsync(MeshSiteCtx ctx)
             {
                 var listFails = 0;
+                var nestedFiles = new Dictionary<string, RaceFile>(StringComparer.OrdinalIgnoreCase);
+                var nextNestedList = DateTime.MinValue;
+                long nestedListVersion = -1;
                 while (!ct.IsCancellationRequested && Volatile.Read(ref raceDone) == 0)
                 {
+                    // Removed from the race (race action): stop listing it. Completion checks
+                    // skip removed sites, and a reset brings the site (and its lister) back.
+                    if (IsRemovedFromRace(id, ctx.Name))
+                    {
+                        try { await Task.Delay(500, ct).ConfigureAwait(false); }
+                        catch (OperationCanceledException) { return; }
+                        continue;
+                    }
                     var added = 0;
                     FtpClient? conn = null;
                     try
@@ -1729,16 +1970,29 @@ public sealed partial class WeaveEngine
                         lock (sync) listingVersion = evidenceVersion;
                         var listTimer = System.Diagnostics.Stopwatch.StartNew();
                         var sawCompletion = false;
+                        bool includeNested;
+                        lock (sync) includeNested = DateTime.UtcNow >= nextNestedList ||
+                            (inFlight.Count == 0 && nestedListVersion != evidenceVersion);
                         var files = await ListSourceFilesAsync(conn, ctx.Path, ctx.Skiplist, ct,
-                            completeMarkers: CompleteMarkersFor(ctx.Site),
+                            recursive: includeNested, completeMarkers: CompleteMarkersFor(ctx.Site),
                             onCompletionMarker: _ => sawCompletion = true, throwOnAnyFailure: true).ConfigureAwait(false);
+                        if (includeNested)
+                        {
+                            nestedFiles.Clear();
+                            foreach (var file in files.Where(f => f.ParentRel.Length > 0)) nestedFiles[file.Rel] = file;
+                            nextNestedList = DateTime.UtcNow.AddMilliseconds(250);
+                            nestedListVersion = listingVersion;
+                        }
+                        else files.AddRange(nestedFiles.Values);
                         ctx.Pool.Return(conn);
                         conn = null;
                         listFails = 0;
                         lock (sync)
                         {
-                            if (!ctx.Listed) dirtyFiles.UnionWith(knownSizes.Keys);
+                            if (!ctx.Listed || ctx.ListingFailed) dirtyFiles.UnionWith(knownSizes.Keys);
                             ctx.Listed = true;
+                            ctx.RootMissing = false;
+                            ctx.ListingFailed = false;
                             ctx.CompletionSeen = sawCompletion;
                             var present = files.Select(f => f.Rel).ToHashSet(StringComparer.OrdinalIgnoreCase);
                             foreach (var rel in ctx.Files.Keys.ToList())
@@ -1749,8 +2003,9 @@ public sealed partial class WeaveEngine
                                 dirtyFiles.Add(rel);
                                 added++;
                             }
-                            foreach (var f in files)
+                            foreach (var listedFile in files)
                             {
+                                var f = ReconcileFollowedSourceListing(followedSourceHints, ctx.Name + "|" + listedFile.Rel, listedFile);
                                 if (inFlight.Contains(f.Rel + "|" + ctx.Name)) continue;
                                 // A transfer finishing while LIST was in progress wins
                                 // over that older snapshot until the next listing.
@@ -1759,13 +2014,19 @@ public sealed partial class WeaveEngine
                                 {
                                     ctx.Files[f.Rel] = f;
                                     ctx.Confirmed.Remove(f.Rel);
-                                    dirtyFiles.Add(f.Rel);
-                                    added++;
-                                }
-                                if (ctx.PendingDupes.TryGetValue(f.Rel, out var pending) &&
-                                    pending.IsConfirmedByListing(listingStarted, f.Size, knownSizes.TryGetValue(f.Rel, out var expectedSize) ? expectedSize : f.Size))
-                                {
-                                    ctx.PendingDupes.Remove(f.Rel);
+                                    if (ctx.Site.AllowDownload)
+                                    {
+                                        // Only reset routes fed by this changed source.
+                                        // A target's growing copy must not reopen failures
+                                        // for an unchanged source on every LIST.
+                                        foreach (var dst in contexts)
+                                        {
+                                            var key = ctx.Name + "|" + dst.Name + "|" + f.Rel;
+                                            lock (attemptsLock) attempts.Remove(key);
+                                            uploadBusyNotBefore.TryRemove(key, out _);
+                                            uploadBusyRetries.TryRemove(key, out _);
+                                        }
+                                    }
                                     dirtyFiles.Add(f.Rel);
                                     added++;
                                 }
@@ -1777,34 +2038,76 @@ public sealed partial class WeaveEngine
                                 var sourceSize = contexts.Where(c => c.Site.AllowDownload)
                                     .Select(c => c.Files.TryGetValue(rel, out var file) ? file.Size : 0).DefaultIfEmpty().Max();
                                 if (sourceSize > 0) knownSizes[rel] = sourceSize;
-                                else if (!knownSizes.ContainsKey(rel) && ctx.Files.TryGetValue(rel, out var file))
-                                    knownSizes[rel] = file.Size;
+                                else knownSizes.TryRemove(rel, out _);
                             }
+                            if (listingVersion == evidenceVersion)
+                                foreach (var (rel, pending) in ctx.PendingDupes.ToList())
+                                {
+                                    if (inFlight.Contains(rel + "|" + ctx.Name)) continue;
+                                    long? listedSize = present.Contains(rel) && ctx.Files.TryGetValue(rel, out var occupied) ? occupied.Size : null;
+                                    var vanished = pending.ObserveListing(listingStarted, listedSize);
+                                    var complete = listedSize.HasValue && pending.IsConfirmedByListing(listingStarted, listedSize.Value,
+                                        knownSizes.TryGetValue(rel, out var expectedSize) ? expectedSize : 0);
+                                    if (!vanished && !complete) continue;
+                                    ctx.PendingDupes.Remove(rel);
+                                    dirtyFiles.Add(rel);
+                                    added++;
+                                }
                             if (added > 0) evidenceVersion++;
-                            ctx.ListVersion = inFlight.Count == 0 && listingVersion == evidenceVersion ? listingVersion : -1;
+                            ctx.ListVersion = inFlight.Count == 0 && listingVersion == evidenceVersion &&
+                                nestedListVersion == listingVersion ? listingVersion : -1;
                             // Register the parse task before exposing this listing to the
                             // coordinator. Otherwise a completion marker can end the race
                             // in the tiny window between listing the SFV and parsing it.
                             foreach (var sfv in files.Where(f => f.Name.EndsWith(".sfv", StringComparison.OrdinalIgnoreCase)))
                                 QueueSfvRead(ctx, sfv);
                         }
-                        var remainingMs = pollMs - (int)listTimer.ElapsedMilliseconds;
+                        raceProgress.Observe(ctx.Name, files.Select(f => (f.Rel, f.Size)), listingStarted);
+                        var remainingMs = ScaleListCadence(ctx.Site, pollMs) - (int)listTimer.ElapsedMilliseconds;
                         if (added > 0) workSignal.Release(Math.Min(added, 32));
                         if (remainingMs > 0) await Task.Delay(remainingMs, ct).ConfigureAwait(false);
                         continue;
                     }
                     catch (OperationCanceledException) { if (conn is not null) ctx.Pool.Drop(conn); return; }
+                    catch (FtpDirectoryNotFoundException ex) when (ex.RemotePath.TrimEnd('/').Equals(ctx.Path.TrimEnd('/'), StringComparison.Ordinal))
+                    {
+                        if (conn is not null) ctx.Pool.Return(conn);
+                        listFails++;
+                        lock (sync)
+                        {
+                            // A missing initial root is different from a failed listing.
+                            // Let a worker create it; completion still needs a real LIST.
+                            if (ctx.RootMissing != !ctx.Listed || ctx.ListingFailed != ctx.Listed)
+                            {
+                                dirtyFiles.UnionWith(knownSizes.Keys);
+                                added++;
+                            }
+                            ctx.RootMissing = !ctx.Listed;
+                            ctx.ListingFailed = ctx.Listed;
+                            ctx.ListVersion = -1;
+                        }
+                    }
                     catch (Exception ex)
                     {
                         if (conn is not null) ctx.Pool.Drop(conn);
                         listFails++;
                         if (listFails == 1 || listFails % 15 == 0)
                             LogJobLive(id, "warn", $"{ctx.Name} list failed ({listFails}x): {FirstLineOf(ex.Message)}");
-                        lock (sync) ctx.ListVersion = -1;
+                        lock (sync)
+                        {
+                            if (ctx.RootMissing || !ctx.ListingFailed)
+                            {
+                                ctx.RootMissing = false;
+                                dirtyFiles.UnionWith(knownSizes.Keys);
+                            }
+                            ctx.ListingFailed = true;
+                            ctx.ListVersion = -1;
+                        }
                     }
 
                     if (added > 0) workSignal.Release(Math.Min(added, 32));
-                    try { await Task.Delay(pollMs, ct).ConfigureAwait(false); }
+                    var retryMs = Math.Max(pollMs, (int)Math.Min(2000L, (long)pollMs << Math.Min(listFails - 1, 7)));
+                    try { await Task.Delay(retryMs, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) { return; }
                 }
             }
@@ -1820,6 +2123,9 @@ public sealed partial class WeaveEngine
                     int knownFiles, coveredFiles, inFlightCount, expectedFiles;
                     long knownBytes;
                     bool allListed, completionMarkerSeen, completionMarkerCanComplete, sfvComplete, sfvReadPending, workOutstanding;
+                    bool quietComplete, occupancyGrowing, onlyOccupied;
+                    long version;
+                    string? waitingDetail = null;
                     lock (sync)
                     {
                         var known = contexts
@@ -1835,41 +2141,77 @@ public sealed partial class WeaveEngine
                         coveredFiles = known.Count(CoveredForReachableMesh);
                         inFlightCount = inFlight.Count;
                         expectedFiles = expectedFromSfv.Count;
-                        allListed = contexts.All(c => c.Listed && c.ListVersion == evidenceVersion);
+                        version = evidenceVersion;
+                        allListed = contexts.Where(c => !IsRemovedFromRace(id, c.Name))
+                            .All(c => c.Listed && !c.ListingFailed && c.ListVersion == version);
                         completionMarkerSeen = contexts.Any(c => c.CompletionSeen);
                         var sfvVisibleInMesh = known.Any(f => f.Rel.EndsWith(".sfv", StringComparison.OrdinalIgnoreCase) && f.Size > 0);
                         completionMarkerCanComplete = completionMarkerSeen && !sfvVisibleInMesh;
-                        sfvReadPending = !sfvReads.IsEmpty;
+                        sfvReadPending = !sfvReads.IsEmpty || known.Any(f => f.Rel.EndsWith(".sfv", StringComparison.OrdinalIgnoreCase) &&
+                            (!parsedSfvSizes.TryGetValue(f.Rel, out var parsedSize) || parsedSize != f.Size));
                         workOutstanding = HasMeshWorkOutstanding(known);
                         sfvComplete = expectedFiles > 0 && expectedFromSfv.All(rel =>
                             CoveredForReachableMesh((rel, knownSizes.TryGetValue(rel, out var size) ? size : 0)));
+                        quietComplete = quietCompletion.Observe(!IsJobPaused(id) && allListed && !sfvReadPending &&
+                            !sfvVisibleInMesh && expectedFiles == 0 && inFlightCount == 0 && knownFiles > 0 &&
+                            coveredFiles == knownFiles, version, DateTime.UtcNow);
+                        occupancyGrowing = contexts.Any(c => c.PendingDupes.Values.Any(p => p.IsWaitingForProgress(DateTime.UtcNow)));
+                        var uncovered = known.Where(f => !CoveredForReachableMesh(f)).ToList();
+                        onlyOccupied = allListed && !sfvReadPending && uncovered.Count > 0 && uncovered.All(f =>
+                        {
+                            var missingTargets = contexts.Where(dst => contexts.Any(src => RouteAllowed(src, dst)) &&
+                                !SkiplistRules.Blocks(dst.Skiplist, f.Rel) &&
+                                !SkiplistRules.UniqueSatisfied(dst.Skiplist, f.Rel, dst.Files.Keys, skipUnique, dst.Name) &&
+                                !HasComplete(dst, f.Rel, f.Size)).ToList();
+                            return missingTargets.Count > 0 && missingTargets.All(dst => dst.PendingDupes.ContainsKey(f.Rel));
+                        });
+                        if (poll % logEvery == 1 && inFlightCount == 0 && coveredFiles < knownFiles)
+                        {
+                            // Bound diagnostic work and output to the existing five-second
+                            // poll log, not every scheduler tick or every file in a release.
+                            waitingDetail = string.Join("; ", known.Where(f => !CoveredForReachableMesh(f)).Take(8).Select(f =>
+                                $"{f.Rel} expected={f.Size} [" + string.Join(", ", contexts.Take(8).Select(c =>
+                                    $"{c.Name}={(c.Files.TryGetValue(f.Rel, out var listed) ? listed.Size.ToString() : "missing")}" +
+                                    (c.PendingDupes.ContainsKey(f.Rel) ? " (occupied)" : ""))) + "]"));
+                        }
                     }
+                    PublishManifest();
                     _store.UpdateJobTransient(id, j =>
                     {
-                        j.FilesTotal = Math.Max(j.FilesTotal, knownFiles);
+                        j.FilesTotal = knownFiles;
                         j.FilesCovered = coveredFiles;
-                        j.BytesTotal = Math.Max(j.BytesTotal, knownBytes);
+                        j.RaceCoverageKnown = true;
+                        j.BytesTotal = knownBytes;
                         j.SpeedBps = CurrentSpeed(DateTime.UtcNow);
                     });
                     if (poll % logEvery == 1)
                         LogJobLive(id, "info", $"mesh poll #{poll}: {coveredFiles}/{knownFiles} covered, {inFlightCount} in flight, {sentCount} raced");
+                    if (waitingDetail is not null)
+                        LogJobLive(id, "info", "mesh waiting (up to 8 files/sites): " + waitingDetail);
                     if (allListed && !sfvReadPending && inFlightCount == 0 && knownFiles > 0 && coveredFiles == knownFiles &&
-                        (sfvComplete || completionMarkerCanComplete))
+                        !IsJobPaused(id) && (sfvComplete || completionMarkerCanComplete || quietComplete))
                     {
                         var reason = sfvComplete
                             ? $"all {expectedFiles} SFV file(s) are covered on every site"
+                            : quietComplete ? "unchanged fresh listings cover every file after the quiet completion window"
                             : "completion marker seen and all listed files are covered on every site";
                         LogJob(id, "info", $"mesh race complete: {reason}");
                         Volatile.Write(ref raceDone, 1);
                         stopWorkers.Cancel();
                         return;
                     }
-                    if (inFlightCount == 0 && !workOutstanding)
+                    if (!IsJobPaused(id) && inFlightCount == 0 && !workOutstanding)
                     {
                         idleCycles++;
+                        if (idleVersion != version) { idleSince = null; idleVersion = version; }
                         idleSince ??= DateTime.UtcNow;
-                        if (DateTime.UtcNow - idleSince.Value >= idleTimeout)
+                        if (!occupancyGrowing && DateTime.UtcNow - idleSince.Value >= idleTimeout)
                         {
+                            if (onlyOccupied)
+                            {
+                                incompleteReason = "mesh race incomplete: destination remains occupied without new file evidence; automatic retry suppressed";
+                                retryIncomplete = false;
+                            }
                             LogJob(id, "info", $"mesh race stopped after {(DateTime.UtcNow - idleSince.Value).TotalSeconds:0.0}s idle with no work");
                             Volatile.Write(ref raceDone, 2);
                             stopWorkers.Cancel();
@@ -1911,13 +2253,18 @@ public sealed partial class WeaveEngine
                     var xferStart = DateTime.UtcNow;
                     try
                     {
+                        if (!RouteAllowed(pick.Value.Src, pick.Value.Dst)) continue;
                         s = await pair.Source.OpenAsync(wct).ConfigureAwait(false);
                         d = await pair.Destination.OpenAsync(wct).ConfigureAwait(false);
                         wct.ThrowIfCancellationRequested();
 
+                        if (!RouteAllowed(pick.Value.Src, pick.Value.Dst)) continue;
+
                         await pick.Value.Dst.DirSem.WaitAsync(ct).ConfigureAwait(false);
                         try { await EnsureDestDirAsync(d, pick.Value.Dst.Path, pick.Value.File.ParentRel, pick.Value.Dst.MadeDirs, id).ConfigureAwait(false); }
                         finally { pick.Value.Dst.DirSem.Release(); }
+
+                        if (!RouteAllowed(pick.Value.Src, pick.Value.Dst)) continue;
 
                         var absDst = FtpClient.JoinRemote(pick.Value.Dst.Path, pick.Value.File.Rel);
                         var attemptKey = pick.Value.File.Rel + "|" + pick.Value.Dst.Name;
@@ -1948,6 +2295,7 @@ public sealed partial class WeaveEngine
                             row.Bps = 0;
                             row.Status = "active";
                             row.Error = "";
+                            raceProgress.Start(row);
                         });
                         var xfer = FxpTransfer.TransferSingleAsync(s, d, pick.Value.Dst.Config, pick.Value.File.Abs, absDst,
                             (level, message) => LogJobLive(id, level, message), ct);
@@ -1975,22 +2323,33 @@ public sealed partial class WeaveEngine
                         if (slowSkipped) { srcOk = false; dstOk = false; } // ABOR replies unread — drop conns
 
                         var dur = Math.Max(0.001, (DateTime.UtcNow - xferStart).TotalSeconds);
+                        var finalSize = await CompletedFxpSizeAsync(d, pick.Value.File.Name, pick.Value.File.Size, ct).ConfigureAwait(false);
+                        dstOk &= finalSize.Reusable;
+                        ct.ThrowIfCancellationRequested();
+                        var completedFile = new RaceFile(pick.Value.File.Abs, pick.Value.File.Rel,
+                            pick.Value.File.Name, pick.Value.File.ParentRel, finalSize.Size);
+                        var completedPick = new MeshPick(pick.Value.Src, pick.Value.Dst, completedFile);
+                        if (!finalSize.Verified)
+                            LogJobLive(id, "warn", $"{pick.Value.Src.Name} > {pick.Value.Dst.Name}: final SIZE unavailable for {pick.Value.File.Rel}; byte count estimated from source listing");
                         _store.UpdateJobTransient(id, j =>
                         {
                             var row = j.Files.LastOrDefault(x => x.Name == pick.Value.File.Rel &&
                                 x.FromSite == pick.Value.Src.Name && x.ToSite == pick.Value.Dst.Name && x.Status == "active");
                             if (row is not null)
                             {
+                                row.Size = finalSize.Size;
                                 row.Status = "done";
                                 row.Seconds = dur;
                                 row.Bps = row.Size / dur;
+                                row.Error = finalSize.Verified ? "" : "Byte count estimated: final SIZE unavailable";
                             }
                         });
-                        RecordSuccess(pick.Value, xferStart);
-                        LogJobLive(id, "info", $"{pick.Value.Src.Name} > {pick.Value.Dst.Name}: raced {pick.Value.File.Rel} in {dur:0.00}s");
-                        RecordRoutePerformance(pick.Value.Src.Name, pick.Value.Dst.Name, pick.Value.File.Size / dur);
-                        _store.AddSiteTraffic(pick.Value.Src.Name, pick.Value.File.Size, 0, dur);
-                        _store.AddSiteTraffic(pick.Value.Dst.Name, 0, pick.Value.File.Size, dur);
+                        manifest.Uploaded(pick.Value.File.Rel, finalSize.Size);
+                        RecordSuccess(completedPick, xferStart, pick.Value.File.Size, finalSize.Verified);
+                        LogJobLive(id, "info", $"{pick.Value.Src.Name} > {pick.Value.Dst.Name}: raced {pick.Value.File.Rel} ({HumanBytes(finalSize.Size)}) in {dur:0.00}s");
+                        RecordRoutePerformance(pick.Value.Src.Name, pick.Value.Dst.Name, finalSize.Size / dur);
+                        _store.AddSiteTraffic(pick.Value.Src.Name, finalSize.Size, 0, dur);
+                        _store.AddSiteTraffic(pick.Value.Dst.Name, 0, finalSize.Size, dur);
                     }
                     catch (Exception ex) when (slowSkipped)
                     {
@@ -2012,6 +2371,17 @@ public sealed partial class WeaveEngine
                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
                     {
                         cancelled = true; srcOk = false; dstOk = false;
+                    }
+                    catch (Exception ex) when (FxpTransfer.IsInsufficientStorageError(ex))
+                    {
+                        srcOk = false; dstOk = false;
+                        _store.UpdateJobTransient(id, j =>
+                        {
+                            var row = j.Files.LastOrDefault(x => x.Name == pick.Value.File.Rel &&
+                                x.FromSite == pick.Value.Src.Name && x.ToSite == pick.Value.Dst.Name && x.Status == "active");
+                            if (row is not null) { row.Status = "fail"; row.Error = FirstLineOf(ex.Message); }
+                        });
+                        storageFailed(ex);
                     }
                     catch (Exception ex) when (FxpTransfer.TryGetServerSlotLimit(ex, out var downloadLimit, out var serverLimit))
                     {
@@ -2050,10 +2420,15 @@ public sealed partial class WeaveEngine
                             foreach (var name in names.Distinct(StringComparer.OrdinalIgnoreCase))
                             {
                                 var rel = string.IsNullOrEmpty(pick.Value.File.ParentRel) ? name : pick.Value.File.ParentRel + "/" + name;
-                                if (pick.Value.Dst.Confirmed.Contains(rel)) continue;
+                                // The failed file itself always needs occupancy suppression.
+                                // Its earlier 226 may have used a 1-byte/growing source size.
+                                if (pick.Value.Dst.Confirmed.Contains(rel) &&
+                                    !rel.Equals(pick.Value.File.Rel, StringComparison.OrdinalIgnoreCase)) continue;
+                                pick.Value.Dst.Confirmed.Remove(rel);
                                 pick.Value.Dst.PendingDupes.TryAdd(rel, new MeshPendingDupe(now));
                                 dirtyFiles.Add(rel);
                             }
+                            evidenceVersion++;
                         }
                         _store.UpdateJobTransient(id, j =>
                         {
@@ -2063,7 +2438,7 @@ public sealed partial class WeaveEngine
                         });
                         LogJobLive(id, "info", $"{pick.Value.Src.Name} > {pick.Value.Dst.Name}: skipped {pick.Value.File.Name}: destination occupied; checking completion via listing");
                     }
-                    catch (Exception ex) when (FxpTransfer.IsBeingUploaded(ex))
+                    catch (Exception ex) when (FxpTransfer.IsBeingUploaded(ex) && !FxpTransfer.IsDestinationBusyError(ex))
                     {
                         if (FxpTransfer.RequiresConnectionDrop(ex)) { srcOk = false; dstOk = false; }
                         requeue = true;
@@ -2118,6 +2493,10 @@ public sealed partial class WeaveEngine
                 .ToList();
             LogJob(id, "info", $"mesh race started with {contexts.Count} site(s), routes {string.Join(", ", eligibleRoutes)}, poll every {pollMs}ms, stop after ~{FormatDuration(idleTimeout)} idle");
             var listers = contexts.Select(ListerAsync).ToList();
+            if (settings.PrecreateRaceDirs)
+                foreach (var dst in contexts)
+                    if (!dst.Site.NoPrecreateDir && contexts.Any(src => RouteAllowed(src, dst)))
+                        _ = PrecreateReleaseDirAsync(id, dst.Name, dst.Pool, dst.Path, dst.MadeDirs, dst.DirSem, ct);
             void WakeWorkers()
             {
                 try { if (workSignal.CurrentCount < workerCount) workSignal.Release(); }
@@ -2129,6 +2508,7 @@ public sealed partial class WeaveEngine
             try { await Task.WhenAll(listers.Concat(workers).Append(coordinator)).ConfigureAwait(false); }
             finally
             {
+                PublishManifest(force: true);
                 foreach (var c in contexts)
                 {
                     c.Pool.AvailabilityChanged -= WakeWorkers;
@@ -2136,7 +2516,7 @@ public sealed partial class WeaveEngine
                 }
             }
             if (Volatile.Read(ref raceDone) == 1)
-                return true;
+                return new(true, "");
 
             bool fullyCovered;
             int finalCovered;
@@ -2152,12 +2532,12 @@ public sealed partial class WeaveEngine
                         known.Add((rel, 0));
                 finalTotal = known.Count;
                 finalCovered = known.Count(CoveredForReachableMesh);
-                fullyCovered = contexts.All(c => c.Listed) && finalTotal > 0 &&
+                fullyCovered = contexts.Where(c => !IsRemovedFromRace(id, c.Name)).All(c => c.Listed) && finalTotal > 0 &&
                     known.All(CoveredForReachableMesh);
             }
             if (!fullyCovered)
                 LogJob(id, "warn", $"mesh race incomplete: {finalCovered}/{finalTotal} file(s) covered on every site");
-            return fullyCovered;
+            return new(false, incompleteReason, retryIncomplete);
         }
         finally
         {
@@ -2165,15 +2545,18 @@ public sealed partial class WeaveEngine
         }
     }
 
-    private async Task<(bool Complete, string Reason)> RunRaceLoopAsync(
-        string id, TransferRequest req, Site srcSite, Site dstSite, CancellationToken ct)
+    private async Task<RaceLoopResult> RunRaceLoopAsync(
+        string id, TransferRequest req, Site srcSite, Site dstSite, CancellationToken ct,
+        Action<Exception> storageFailed, bool retry = false)
     {
+        EnsureTransferAllowed(req);
         var settings = _store.Settings();
         var pollMs = settings.RacePollIntervalMs;
         var wakeMs = FastRaceWakeMs(pollMs);
         var maxIdle = settings.RaceMaxIdleCycles;
         var destinationPrecheck = settings.RaceDestinationPrecheck;
-        var skiplist = MergePatternLists(settings.GlobalSkiplist, srcSite.Skiplist);
+        var skiplist = MergeSkiplists(settings.GlobalSkiplist, srcSite.Skiplist);
+        SkiplistUniqueState skipUnique = new(); // Unique rules: one match per dest dir this race
 
         // API-triggered races run silent (protocol tracing costs throughput); a race
         // started by hand from the browser keeps its FTP Log.
@@ -2204,12 +2587,16 @@ public sealed partial class WeaveEngine
             var madeDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             using var dirSem = new SemaphoreSlim(1, 1);
             var started = DateTime.UtcNow;
-            long cumulative = 0;
+            long cumulative = _store.JobHeader(id)?.CumulativeBytes ?? 0;
             var idleCycles = 0;
             DateTime? idleSince = null;
             var idleTimeout = RaceIdleTimeout(maxIdle, pollMs);
             var poll = 0;
             var lastFound = -1;
+            var quietCompletion = new RaceQuietCompletion(idleTimeout);
+            long idleVersion = -1;
+            var retryIncomplete = true;
+            var pendingDupes = new Dictionary<string, MeshPendingDupe>(StringComparer.OrdinalIgnoreCase);
             var listFails = 0;
             var lastSourceListMs = 0;
             var lastDestListMs = 0;
@@ -2254,18 +2641,24 @@ public sealed partial class WeaveEngine
                     srcPool.WarmUpAsync(Math.Min(srcPool.Max, wantSlots + 4), ct),   // + lister & staging headroom
                     dstPool.WarmUpAsync(Math.Min(dstPool.Max, wantSlots + 3), ct))
                 .ContinueWith(t => { _ = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
+            if (settings.PrecreateRaceDirs && !dstSite.NoPrecreateDir)
+                _ = PrecreateReleaseDirAsync(id, dstSite.Name, dstPool, req.DestPath, madeDirs, dirSem, ct);
 
             // Continuous engine: a dedicated lister keeps polling the source
             // and feeding a live scored queue WHILE the workers transfer in parallel.
             // No list→drain→list barrier — a file that lands mid-transfer starts moving
             // the moment a slot frees up.
             var pending = new List<RaceFile>();
+            var raceProgress = new RaceProgressPublisher(_store, id);
             var inFlight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var manifest = new RaceManifestPublisher(_store, id);
             var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var followedSourceHints = new Dictionary<string, (long Listed, long Final, DateTime Until)>(StringComparer.OrdinalIgnoreCase);
             var expectedFromSfv = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var sync = new object();
+            var sfvExcludesSingleByte = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var raceDone = 0; // 0 running, 1 complete, 2 stopped idle
-            var sentCount = 0; // files WE actually moved (transferred also holds opponents' files)
+            var sentCount = _store.JobHeader(id)?.FilesDone ?? 0; // files WE actually moved (transferred also holds opponents' files)
             using var stopWorkers = CancellationTokenSource.CreateLinkedTokenSource(ct);
             // Streams are capped at wantSlots; when the pools have login headroom we run
             // extra workers that pre-negotiate (PRET/PASV/PORT) the NEXT files and sit at
@@ -2290,6 +2683,22 @@ public sealed partial class WeaveEngine
             var destinationComplete = 0;
             var completionDescription = "";
             var incompleteReason = "race stopped idle before completion";
+
+            bool StopForBlockedRoute()
+            {
+                var removedSite = IsRemovedFromRace(id, req.FromSite) ? req.FromSite
+                    : IsRemovedFromRace(id, req.ToSite) ? req.ToSite : null;
+                if (removedSite is null && _store.TransferAllowed(req.FromSite, req.ToSite, race: true)) return false;
+                if (Interlocked.Exchange(ref raceDone, 2) != 2)
+                {
+                    incompleteReason = removedSite is not null
+                        ? $"{removedSite} was removed from the race"
+                        : $"route {req.FromSite} -> {req.ToSite} is blocked by current site transfer settings";
+                    LogJob(id, "warn", incompleteReason);
+                }
+                stopWorkers.Cancel();
+                return true;
+            }
             var nextCompletionProbe = DateTime.MinValue;
             var nextNestedSourceList = DateTime.MinValue;
             long nestedSourceListVersion = -1;
@@ -2319,7 +2728,7 @@ public sealed partial class WeaveEngine
                     for (var i = 0; i < pending.Count; i++)
                     {
                         var f = pending[i];
-                        if (transferred.ContainsKey(f.Rel)) { pending.RemoveAt(i); i--; continue; } // opponent won it
+                        if (transferred.ContainsKey(f.Rel) || pendingDupes.ContainsKey(f.Rel)) { pending.RemoveAt(i); i--; continue; } // opponent won/claimed it
                         if (IsUnreadableSfv(f))
                         {
                             notBefore[f.Rel] = now.AddMilliseconds(250);
@@ -2327,6 +2736,11 @@ public sealed partial class WeaveEngine
                         }
                         if (notBefore.TryGetValue(f.Rel, out var nb) && nb > now) continue;
                         lock (attemptsLock) { if (InBackoff(attempts, f.Rel, nowMs)) continue; }
+                        if (SkiplistRules.UniqueBlocks(skiplist, f.Rel, destinationFiles.Keys, skipUnique, "dst"))
+                        {
+                            pending.RemoveAt(i); i--; // Unique rule: dest dir already has its one match
+                            continue;
+                        }
                         pending.RemoveAt(i);
                         inFlight.Add(f.Rel);
                         return f;
@@ -2340,7 +2754,19 @@ public sealed partial class WeaveEngine
                 lock (sync)
                 {
                     inFlight.Remove(f.Rel);
+                    if (!ct.IsCancellationRequested && !transferred.ContainsKey(f.Rel) &&
+                        sourceSizes.TryGetValue(f.Rel, out var currentSize) && currentSize != f.Size)
+                    {
+                        // A replacement discovered during the failed transfer must not
+                        // inherit that older file's exhausted attempts or stale size.
+                        lock (attemptsLock) attempts.Remove(f.Rel);
+                        notBefore.TryRemove(f.Rel, out _);
+                        uploadBusyRetries.TryRemove(f.Rel, out _);
+                        f = new RaceFile(f.Abs, f.Rel, f.Name, f.ParentRel, currentSize);
+                        requeue = true;
+                    }
                     if (requeue) { pending.Add(f); SortPending(); }
+                    else if (!transferred.ContainsKey(f.Rel)) known.Remove(f.Rel);
                 }
                 if (requeue) workSignal.Release();
             }
@@ -2352,15 +2778,24 @@ public sealed partial class WeaveEngine
                 // unknown). A 0-byte/growing file is an opponent's in-flight claim: keep
                 // the file in play — the dest lister holds it via notBefore and frees it
                 // for a new attempt the moment the claim dies.
-                return size > 0 && (f.Size <= 0 || size == f.Size);
+                lock (sync)
+                    return !pendingDupes.ContainsKey(f.Rel) && size > 0 &&
+                        !(size == 1 && sfvExcludesSingleByte.Contains(f.Rel)) && (f.Size <= 0 || size == f.Size);
             }
 
-            void RecordSuccess(RaceFile f, DateTime startedAt)
+            void RecordSuccess(RaceFile f, DateTime startedAt, long listedSize, bool verifiedSize)
             {
+                long knownBytes;
                 lock (sync)
                 {
+                    if (verifiedSize && f.Size > listedSize && sourceSizes.TryGetValue(f.Rel, out var sourceSize) && sourceSize == listedSize)
+                    {
+                        followedSourceHints[f.Rel] = (listedSize, f.Size, DateTime.UtcNow.AddSeconds(5));
+                        sourceSizes[f.Rel] = f.Size;
+                    }
                     transferred.TryAdd(f.Rel, true);
                     destinationFiles[f.Rel] = Math.Max(1, f.Size);
+                    knownBytes = sourceSizes.Values.Sum(size => Math.Max(0, size));
                     // 226 confirms this attempt, not subsequent SFV/CRC acceptance.
                     evidenceVersion++;
                 }
@@ -2374,6 +2809,7 @@ public sealed partial class WeaveEngine
                 _store.UpdateJobTransient(id, j =>
                 {
                     j.FilesDone = sent; // files WE won, not the whole release
+                    j.BytesTotal = knownBytes;
                     j.CurrentFile = f.Name;
                     j.BytesDone = cum;
                     j.CumulativeBytes = cum;
@@ -2476,12 +2912,18 @@ public sealed partial class WeaveEngine
                         return;
                     }
 
+                    manifest.Register(sfvFile.Rel, sfvFile.ParentRel, parsed);
                     var expectedRows = new List<(string Rel, long Size, string Status, string Error)>();
                     foreach (var file in parsed)
                     {
                         var rel = string.IsNullOrEmpty(sfvFile.ParentRel) ? file.Name : sfvFile.ParentRel + "/" + file.Name;
                         var addedExpected = false;
-                        lock (sync) addedExpected = expectedFromSfv.Add(rel);
+                        lock (sync)
+                        {
+                            addedExpected = expectedFromSfv.Add(rel);
+                            if (SfvExcludesSingleByte(file.Crc)) sfvExcludesSingleByte.Add(rel);
+                            else sfvExcludesSingleByte.Remove(rel);
+                        }
                         if (!addedExpected) continue;
                         sourceSizes.TryGetValue(rel, out var knownSize);
                         expectedRows.Add((rel, knownSize, "expected", $"listed in {sfvFile.Rel}"));
@@ -2517,22 +2959,50 @@ public sealed partial class WeaveEngine
                 sfvReads.GetOrAdd(sfvFile.Rel, _ => ReadAndParseSfvAsync(sfvFile));
             }
 
+            void PublishManifest(bool force = false)
+            {
+                if (!force && !manifest.Due) return;
+                RaceManifestObservation[] rows;
+                lock (sync)
+                {
+                    rows = expectedFromSfv.Select(rel =>
+                    {
+                        sourceSizes.TryGetValue(rel, out var expected);
+                        destinationFiles.TryGetValue(rel, out var size);
+                        var covered = size > 0 && !(size == 1 && sfvExcludesSingleByte.Contains(rel)) &&
+                            (expected <= 0 || size == expected);
+                        bool? observed = sourceListVersion >= 0 && destinationListVersion >= 0 ? covered : null;
+                        return new RaceManifestObservation(rel, expected > 0 ? expected : size > 0 ? size : null, observed, expected > 0);
+                    }).ToArray();
+                }
+                manifest.Publish(rows);
+            }
+
             bool SnapshotShowsComplete(out string description)
             {
                 lock (sync)
                 {
                     description = "";
-                    if (inFlight.Count != 0 || !sfvReads.IsEmpty ||
+                    if (IsJobPaused(id) || inFlight.Count != 0 || !sfvReads.IsEmpty ||
                         sourceListVersion != evidenceVersion || destinationListVersion != evidenceVersion)
+                    {
+                        quietCompletion.Observe(false, evidenceVersion, DateTime.UtcNow);
                         return false;
+                    }
                     // An unreadable/new SFV must not be bypassed by an old marker.
                     if (sourceSizes.Any(f => f.Key.EndsWith(".sfv", StringComparison.OrdinalIgnoreCase) &&
                         (!parsedSfvSizes.TryGetValue(f.Key, out var size) || size != f.Value)))
                         return false;
+                    var known = CurrentCoverage();
+                    var allCovered = known.Count > 0 && known.All(f => DestinationCovered(f.Rel, f.Size));
+                    var quietComplete = quietCompletion.Observe(allCovered && expectedFromSfv.Count == 0 &&
+                        !sourceSizes.Keys.Any(rel => rel.EndsWith(".sfv", StringComparison.OrdinalIgnoreCase)), evidenceVersion, DateTime.UtcNow);
+                    if (!allCovered) return false;
                     if (expectedFromSfv.Count > 0)
                     {
                         foreach (var rel in expectedFromSfv)
                             if (!destinationFiles.TryGetValue(rel, out var size) || size <= 0 ||
+                                (size == 1 && sfvExcludesSingleByte.Contains(rel)) ||
                                 (sourceSizes.TryGetValue(rel, out var expectedSize) && size != expectedSize))
                                 return false;
                         foreach (var sfv in parsedSfvSizes)
@@ -2541,11 +3011,19 @@ public sealed partial class WeaveEngine
                         description = "fresh destination listing confirms all SFV files and source sizes";
                         return true;
                     }
-                    if (destinationComplete == 0) return false;
-                    description = completionDescription;
+                    if (destinationComplete == 0 && !quietComplete) return false;
+                    description = quietComplete ? "unchanged fresh listings cover every file after the quiet completion window" : completionDescription;
                     return true;
                 }
             }
+
+            List<(string Rel, long Size)> CurrentCoverage() => sourceSizes.Keys.Union(expectedFromSfv, StringComparer.OrdinalIgnoreCase)
+                .Select(rel => (rel, sourceSizes.TryGetValue(rel, out var size) ? size :
+                    destinationFiles.TryGetValue(rel, out var onTarget) ? onTarget : 0)).ToList();
+
+            bool DestinationCovered(string rel, long expected) => !pendingDupes.ContainsKey(rel) &&
+                destinationFiles.TryGetValue(rel, out var size) && size > 0 &&
+                !(size == 1 && sfvExcludesSingleByte.Contains(rel)) && (expected <= 0 || size == expected);
 
             string DescribeIncompleteSnapshot()
             {
@@ -2580,12 +3058,17 @@ public sealed partial class WeaveEngine
                     var chk = await CheckReleaseOnAsync(probe, dstSite, req.DestPath, persist: false, probeCts.Token).ConfigureAwait(false);
                     dstPool.Return(probe);
                     probe = null;
+                    manifest.Register("", "", chk.Sfv);
                     lock (sync)
                     {
                         // Learn an SFV supplied by another racer, but never finish
                         // using CheckRelease's listing taken before reading that SFV.
                         foreach (var file in chk.Sfv)
+                        {
                             if (expectedFromSfv.Add(file.Name)) evidenceVersion++;
+                            if (SfvExcludesSingleByte(file.Crc)) sfvExcludesSingleByte.Add(file.Name);
+                            else sfvExcludesSingleByte.Remove(file.Name);
+                        }
                     }
                     var complete = SnapshotShowsComplete(out _);
                     if (complete)
@@ -2677,8 +3160,20 @@ public sealed partial class WeaveEngine
                         var listedBytes = files.Where(file => file.Size > 0).Sum(file => file.Size);
                         lock (sync)
                         {
-                            foreach (var f in files)
+                            if (listingSucceeded && listingVersion == evidenceVersion && nestedSourceListVersion == listingVersion)
                             {
+                                var present = files.Select(f => f.Rel).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                                foreach (var rel in sourceSizes.Keys.Where(rel => !present.Contains(rel) && !inFlight.Contains(rel)).ToList())
+                                {
+                                    sourceSizes.TryRemove(rel, out _);
+                                    known.Remove(rel);
+                                    pending.RemoveAll(f => f.Rel.Equals(rel, StringComparison.OrdinalIgnoreCase));
+                                    evidenceVersion++;
+                                }
+                            }
+                            foreach (var listedFile in files)
+                            {
+                                var f = ReconcileFollowedSourceListing(followedSourceHints, listedFile.Rel, listedFile);
                                 var changed = sourceSizes.TryGetValue(f.Rel, out var oldSize) && oldSize != f.Size;
                                 if (!sourceSizes.ContainsKey(f.Rel) || changed) evidenceVersion++;
                                 sourceSizes[f.Rel] = f.Size;
@@ -2695,7 +3190,7 @@ public sealed partial class WeaveEngine
                                     known.Remove(f.Rel);
                                     pending.RemoveAll(p => p.Rel.Equals(f.Rel, StringComparison.OrdinalIgnoreCase));
                                 }
-                                if (transferred.ContainsKey(f.Rel)) continue;
+                                if (transferred.ContainsKey(f.Rel) || pendingDupes.ContainsKey(f.Rel)) continue;
                                 bool exceeded;
                                 lock (attemptsLock) { exceeded = AttemptsExceeded(attempts, f.Rel); }
                                 if (exceeded) continue;
@@ -2751,12 +3246,24 @@ public sealed partial class WeaveEngine
                         // Refresh the speed each poll too, so it decays toward 0 when the
                         // source goes quiet instead of freezing at the last transfer's rate.
                         var liveSpeed = CurrentSpeed(DateTime.UtcNow);
+                        int expectedCount, coveredCount, currentCount;
+                        long currentBytes, version;
+                        lock (sync)
+                        {
+                            expectedCount = expectedFromSfv.Count;
+                            var current = CurrentCoverage();
+                            currentCount = current.Count;
+                            currentBytes = current.Sum(f => Math.Max(0, f.Size));
+                            coveredCount = current.Count(f => DestinationCovered(f.Rel, f.Size));
+                            version = evidenceVersion;
+                        }
+                        PublishManifest();
                         _store.UpdateJobTransient(id, j =>
                         {
-                            int expectedCount;
-                            lock (sync) expectedCount = expectedFromSfv.Count;
-                            j.FilesTotal = Math.Max(j.FilesTotal, Math.Max(knownCount, expectedCount));
-                            j.BytesTotal = Math.Max(j.BytesTotal, listedBytes);
+                            j.FilesCovered = coveredCount;
+                            j.RaceCoverageKnown = true;
+                            j.FilesTotal = currentCount;
+                            j.BytesTotal = currentBytes;
                             j.BytesDone = Interlocked.Read(ref cumulative);
                             j.SpeedBps = liveSpeed;
                         });
@@ -2770,9 +3277,10 @@ public sealed partial class WeaveEngine
                             break;
                         }
 
-                        if (added == 0 && pendingCount == 0 && inFlightCount == 0)
+                        if (!IsJobPaused(id) && added == 0 && pendingCount == 0 && inFlightCount == 0)
                         {
                             idleCycles++;
+                            if (idleVersion != version) { idleSince = null; idleVersion = version; }
                             idleSince ??= DateTime.UtcNow;
                             // Completion probe over a BORROWED pooled connection (no
                             // dial+TLS+login per probe). SFV contents are the primary
@@ -2795,9 +3303,21 @@ public sealed partial class WeaveEngine
                                 Volatile.Write(ref raceDone, 1);
                                 break;
                             }
-                            if (DateTime.UtcNow - idleSince.Value >= idleTimeout)
+                            bool occupancyGrowing;
+                            lock (sync) occupancyGrowing = pendingDupes.Values.Any(p => p.IsWaitingForProgress(DateTime.UtcNow));
+                            if (!occupancyGrowing && DateTime.UtcNow - idleSince.Value >= idleTimeout)
                             {
                                 incompleteReason = DescribeIncompleteSnapshot();
+                                lock (sync)
+                                {
+                                    var uncovered = CurrentCoverage().Where(f => !DestinationCovered(f.Rel, f.Size)).ToList();
+                                    if (sourceListVersion == evidenceVersion && destinationListVersion == evidenceVersion &&
+                                        sfvReads.IsEmpty && uncovered.Count > 0 && uncovered.All(f => pendingDupes.ContainsKey(f.Rel)))
+                                    {
+                                        incompleteReason = "race incomplete: destination remains occupied without new file evidence; automatic retry suppressed";
+                                        retryIncomplete = false;
+                                    }
+                                }
                                 LogJob(id, "warn", $"{incompleteReason} after {(DateTime.UtcNow - idleSince.Value).TotalSeconds:0.0}s without new files");
                                 Volatile.Write(ref raceDone, 2);
                                 break;
@@ -2822,7 +3342,7 @@ public sealed partial class WeaveEngine
                             : expectedCountForPolling > 0 || quietFor < TimeSpan.FromSeconds(5)
                                 ? pollMs
                                 : quietFor < TimeSpan.FromSeconds(15) ? pollMs * 2 : pollMs * 4;
-                        var remainingMs = Math.Min(targetCycleMs, 30000) - (int)pollCycle.ElapsedMilliseconds;
+                        var remainingMs = ScaleListCadence(srcSite, Math.Min(targetCycleMs, 30000)) - (int)pollCycle.ElapsedMilliseconds;
                         try
                         {
                             if (remainingMs > 0) await Task.Delay(remainingMs, ct).ConfigureAwait(false);
@@ -2849,6 +3369,8 @@ public sealed partial class WeaveEngine
                 {
                     try { await WaitWhilePausedAsync(id, wct).ConfigureAwait(false); }
                     catch (OperationCanceledException) { return; }
+
+                    if (StopForBlockedRoute()) return;
 
                     var picked = TakeBest();
                     if (picked is null)
@@ -2927,7 +3449,7 @@ public sealed partial class WeaveEngine
 
                     // Per-file row: one entry per attempt, updated with the
                     // outcome + speed snapshot. Failed attempts stay visible.
-                    void FileRow(string status, string error = "")
+                    void FileRow(string status, string error = "", double? completedSeconds = null)
                     {
                         _store.UpdateJobTransient(id, j =>
                         {
@@ -2952,11 +3474,13 @@ public sealed partial class WeaveEngine
                             }
                             if (status != "active")
                             {
-                                row.Seconds = Math.Max(0.001, (DateTime.UtcNow - xferStart).TotalSeconds);
+                                if (status == "done") row.Size = Math.Max(0, f.Size);
+                                row.Seconds = completedSeconds ?? Math.Max(0.001, (DateTime.UtcNow - xferStart).TotalSeconds);
                                 row.Bps = status == "done" ? row.Size / row.Seconds : 0;
                             }
                             row.Status = status;
                             row.Error = error;
+                            if (status == "active") raceProgress.Start(row);
                         });
                     }
 
@@ -2965,6 +3489,8 @@ public sealed partial class WeaveEngine
                         await dirSem.WaitAsync(ct).ConfigureAwait(false);
                         try { await EnsureDestDirAsync(d, req.DestPath, f.ParentRel, madeDirs, id).ConfigureAwait(false); }
                         finally { dirSem.Release(); }
+
+                        if (StopForBlockedRoute()) return;
 
                         var absDst = FtpClient.JoinRemote(req.DestPath, f.Rel);
                         if (announced.TryAdd(f.Rel, true))
@@ -3000,9 +3526,17 @@ public sealed partial class WeaveEngine
                         }
                         await xfer.ConfigureAwait(false);
                         if (slowSkipped) { srcOk = false; dstOk = false; } // ABOR replies unread — drop conns
-                        FileRow("done");
-                        RecordSuccess(f, xferStart);
-                        var dur = (DateTime.UtcNow - xferStart).TotalSeconds;
+                        var dur = Math.Max(0.001, (DateTime.UtcNow - xferStart).TotalSeconds);
+                        var finalSize = await CompletedFxpSizeAsync(d, f.Name, f.Size, ct).ConfigureAwait(false);
+                        dstOk &= finalSize.Reusable;
+                        ct.ThrowIfCancellationRequested();
+                        var listedSize = f.Size;
+                        f = new RaceFile(f.Abs, f.Rel, f.Name, f.ParentRel, finalSize.Size);
+                        if (!finalSize.Verified)
+                            LogJobLive(id, "warn", $"final SIZE unavailable for {f.Rel}; byte count estimated from source listing");
+                        FileRow("done", finalSize.Verified ? "" : "Byte count estimated: final SIZE unavailable", completedSeconds: dur);
+                        manifest.Uploaded(f.Rel, finalSize.Size);
+                        RecordSuccess(f, xferStart, listedSize, finalSize.Verified);
                         // Always visible (also for silent API races): per-file duration is
                         // the number that shows where a race is being lost.
                         LogJobLive(id, "info", $"raced {f.Rel} ({HumanBytes(f.Size)}) in {dur:0.00}s");
@@ -3023,7 +3557,7 @@ public sealed partial class WeaveEngine
                         FileRow("slow", $"aborted: {why} ({FirstLineOf(ex.Message)})");
                         LogJobLive(id, "warn", $"aborted {f.Name}: {why}");
                     }
-                    catch (Exception ex) when (FxpTransfer.IsBeingUploaded(ex))
+                    catch (Exception ex) when (FxpTransfer.IsBeingUploaded(ex) && !FxpTransfer.IsDestinationBusyError(ex))
                     {
                         if (FxpTransfer.RequiresConnectionDrop(ex)) { srcOk = false; dstOk = false; }
                         // The source has announced the file but is still writing it. Keep it
@@ -3049,6 +3583,25 @@ public sealed partial class WeaveEngine
                         if (changed)
                             LogJobLive(id, "warn", $"{(downloadLimit ? req.FromSite + " download" : req.ToSite + " upload")} slots reduced to server limit {serverLimit}");
                     }
+                    catch (Exception ex) when (FxpTransfer.IsDestinationBusyError(ex) || FxpTransfer.IsDestinationDupeError(ex))
+                    {
+                        if (FxpTransfer.RequiresConnectionDrop(ex)) { srcOk = false; dstOk = false; }
+                        lock (sync)
+                        {
+                            var names = FxpTransfer.ParseXdupeNames(ex);
+                            names.Add(f.Name);
+                            foreach (var name in names.Distinct(StringComparer.OrdinalIgnoreCase))
+                            {
+                                var rel = string.IsNullOrEmpty(f.ParentRel) ? name : f.ParentRel + "/" + name;
+                                if (SkiplistRules.Blocks(skiplist, rel)) continue;
+                                pendingDupes.TryAdd(rel, new MeshPendingDupe(DateTime.UtcNow));
+                                transferred.TryRemove(rel, out _);
+                            }
+                            evidenceVersion++;
+                        }
+                        FileRow("dupe", "destination occupied; awaiting listing");
+                        LogJobLive(id, "info", $"skipped {f.Name}: destination occupied; checking completion via listing");
+                    }
                     catch (Exception ex) when (FxpTransfer.IsSkippableTransferError(ex))
                     {
                         if (FxpTransfer.RequiresConnectionDrop(ex)) { srcOk = false; dstOk = false; }
@@ -3064,7 +3617,7 @@ public sealed partial class WeaveEngine
                         foreach (var dupeName in FxpTransfer.ParseXdupeNames(ex))
                         {
                             var rel = string.IsNullOrEmpty(f.ParentRel) ? dupeName : f.ParentRel + "/" + dupeName;
-                            if (SkiplistMatches(rel, dupeName, skiplist)) continue;
+                            if (SkiplistRules.Blocks(skiplist, rel)) continue;
                             sourceSizes.TryGetValue(rel, out var learnedSize);
                             destinationFiles[rel] = Math.Max(1, learnedSize);
                             if (transferred.TryAdd(rel, true))
@@ -3087,6 +3640,11 @@ public sealed partial class WeaveEngine
                     {
                         srcOk = false; dstOk = false; // connection may be broken — discard it
                         FileRow("fail", FirstLineOf(ex.Message));
+                        if (FxpTransfer.IsInsufficientStorageError(ex))
+                        {
+                            storageFailed(ex);
+                            continue;
+                        }
                         int count;
                         var nowMs = (DateTime.UtcNow - started).TotalMilliseconds;
                         lock (attemptsLock) { RecordFail(attempts, f.Rel, nowMs); count = attempts[f.Rel].Count; }
@@ -3123,6 +3681,7 @@ public sealed partial class WeaveEngine
                             long listingVersion;
                             lock (sync) listingVersion = evidenceVersion;
                             string? markerSeen = null;
+                            var listingStarted = DateTime.UtcNow;
                             var timer = System.Diagnostics.Stopwatch.StartNew();
                             var have = await ListSourceFilesAsync(conn, req.DestPath, skiplist, ct,
                                 completeMarkers: completeMarkers, onCompletionMarker: name => markerSeen = name,
@@ -3158,12 +3717,27 @@ public sealed partial class WeaveEngine
                                             (!sourceSizes.TryGetValue(file.Rel, out var size) || file.Size == size))
                                             transferred.TryAdd(file.Rel, true);
                                     }
+                                    foreach (var (rel, occupied) in pendingDupes.ToList())
+                                    {
+                                        if (inFlight.Contains(rel)) continue;
+                                        long? size = present.TryGetValue(rel, out var file) ? file.Size : null;
+                                        var vanished = occupied.ObserveListing(listingStarted, size);
+                                        var matches = size.HasValue && occupied.IsConfirmedByListing(listingStarted, size.Value,
+                                            sourceSizes.TryGetValue(rel, out var expected) ? expected : 0) &&
+                                            !(size == 1 && sfvExcludesSingleByte.Contains(rel));
+                                        if (!vanished && !matches) continue;
+                                        pendingDupes.Remove(rel);
+                                        known.Remove(rel);
+                                        if (matches) transferred.TryAdd(rel, true);
+                                        evidenceVersion++;
+                                    }
                                     pending.RemoveAll(p => transferred.ContainsKey(p.Rel));
                                     destinationComplete = markerSeen is null ? 0 : 1;
                                     completionDescription = $"completion marker {markerSeen} visible";
                                     destinationListVersion = inFlight.Count == 0 ? listingVersion : -1;
                                 }
                             }
+                            raceProgress.Observe(req.ToSite, have.Select(f => (f.Rel, f.Size)), listingStarted);
                             foreach (var rel in invalidated)
                                 LogJobLive(id, "warn", $"destination file missing or incomplete after transfer: {rel}; queued for verification/retry");
                         }
@@ -3179,16 +3753,34 @@ public sealed partial class WeaveEngine
                 }
             }
 
+            if (retry)
+            {
+                // Recheck before restarting any workers, even with precheck disabled.
+                // Completed files from the previous pass must not be uploaded again.
+                var probe = await dstPool.BorrowAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    var existing = await ListSourceFilesAsync(probe, req.DestPath, skiplist, ct,
+                        completeMarkers: completeMarkers, throwOnAnyFailure: true).ConfigureAwait(false);
+                    foreach (var file in existing) destinationFiles[file.Rel] = file.Size;
+                    dstPool.Return(probe);
+                }
+                catch { dstPool.Drop(probe); throw; }
+            }
             var listerTask = ListerAsync();
             var workerTasks = Enumerable.Range(0, workerCount).Select(_ => WorkerAsync()).ToList();
             workerTasks.Add(listerTask);
             workerTasks.Add(DestListerAsync());
-            await Task.WhenAll(workerTasks).ConfigureAwait(false);
-            var remainingSfvReads = sfvReads.Values.ToArray();
-            if (remainingSfvReads.Length > 0)
-                await Task.WhenAll(remainingSfvReads).ConfigureAwait(false);
+            try
+            {
+                await Task.WhenAll(workerTasks).ConfigureAwait(false);
+                var remainingSfvReads = sfvReads.Values.ToArray();
+                if (remainingSfvReads.Length > 0)
+                    await Task.WhenAll(remainingSfvReads).ConfigureAwait(false);
+            }
+            finally { PublishManifest(force: true); }
             var complete = Volatile.Read(ref raceDone) == 1;
-            return (complete, complete ? "" : incompleteReason);
+            return new(complete, complete ? "" : incompleteReason, retryIncomplete);
         }
         finally
         {
@@ -3813,7 +4405,7 @@ public sealed partial class WeaveEngine
     // Recursively list files under root over an open source connection, skipping
     // directories/links traversal control, skiplist matches and -missing markers.
     private async Task<List<RaceFile>> ListSourceFilesAsync(
-        FtpClient src, string root, List<string> skiplist, CancellationToken ct, bool recursive = true,
+        FtpClient src, string root, List<SkiplistEntry> skiplist, CancellationToken ct, bool recursive = true,
         IReadOnlyList<string>? completeMarkers = null, Action<string>? onCompletionMarker = null,
         bool throwOnRootFailure = false, bool throwOnAnyFailure = false)
     {
@@ -3846,7 +4438,7 @@ public sealed partial class WeaveEngine
                 if (e.Type is "dir" or "link")
                 {
                     if (isCompletionMarker || IsVirtualDir(e.Name)) continue; // status tags are not traversable directories
-                    if (SkiplistMatches(childAbs, e.Name, skiplist)) continue;
+                    if (SkiplistMatches(childAbs, e.Name, skiplist, isDir: true)) continue;
                     if (!recursive && depth == 0) continue;
                     await WalkAsync(client, childAbs, childRel, depth + 1).ConfigureAwait(false);
                 }
@@ -3857,7 +4449,7 @@ public sealed partial class WeaveEngine
                     // soon as the source listing reports a positive size.
                     if (e.Size <= 0) continue;
                     if (FxpTransfer.IsIncompleteMarker(e.Name)) continue;
-                    if (SkiplistMatches(childAbs, e.Name, skiplist)) continue;
+                    if (SkiplistMatches(childAbs, e.Name, skiplist, isDir: false)) continue;
                     result.Add(new RaceFile(childAbs, childRel, e.Name, relDir, e.Size));
                 }
             }
@@ -3875,6 +4467,153 @@ public sealed partial class WeaveEngine
         var lower = n.ToLowerInvariant();
         if (lower.Contains("complete )") || lower.Contains("% ") && lower.Contains("(")) return true;
         return false;
+    }
+
+    // Destination ordering in a mesh race. One priority step outranks every file-type
+    // class (RaceScore spans 5e9), so a higher-priority site gets ALL its files before a
+    // lower one when source slots are contended. Pre targets (mode First) outrank the
+    // whole priority span (4 steps = 24e9).
+    private const long SitePriorityStep = 6_000_000_000L;
+    private const long PreFirstBias = 30_000_000_000L;
+
+    private static long PriorityBias(SitePriority priority) =>
+        ((int)priority - (int)SitePriority.Normal) * SitePriorityStep;
+
+    // Per-site list frequency: scales a race lister's cadence. Very high lists
+    // back-to-back (the next listing starts as soon as the previous reply is in).
+    private static int ScaleListCadence(Site site, int cadenceMs) => site.ListFrequency switch
+    {
+        ListFrequency.VeryHigh => 0,
+        ListFrequency.High => Math.Max(1, cadenceMs / 2),
+        ListFrequency.Low => Math.Min(30000, cadenceMs * 4),
+        _ => cadenceMs,
+    };
+
+    // Release dir at race start (Settings > Create release dir at race start). Borrows a
+    // pooled connection BEFORE taking the dir lock (workers hold that lock only briefly and
+    // never wait on the pool inside it), MKDs the release dir and records it so the first
+    // transfer skips its own MKD. Background only: never delays listing or transfers.
+    private async Task PrecreateReleaseDirAsync(string id, string siteName, SitePool pool, string path,
+        HashSet<string> made, SemaphoreSlim dirSem, CancellationToken ct)
+    {
+        var operation = Guid.NewGuid();
+        _racePrecreates[operation] = (id, siteName);
+        FtpClient? conn = null;
+        var locked = false;
+        try
+        {
+            conn = await pool.BorrowAsync(ct).ConfigureAwait(false);
+            await dirSem.WaitAsync(ct).ConfigureAwait(false);
+            locked = true;
+            if (IsRemovedFromRace(id, siteName)) return;
+            if (made.Contains(path)) { pool.Return(conn); conn = null; return; }
+            await conn.EnsureCwdAsync(RemoteParentPath(path)).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            if (IsRemovedFromRace(id, siteName)) return;
+            var (code, _) = await conn.CommandAsync("MKD " + RemoteBase(path)).ConfigureAwait(false);
+            if (code / 100 == 2) made.Add(path);
+            pool.Return(conn);
+            conn = null;
+            if (code / 100 == 2) LogJobLive(id, "info", $"{siteName}: created release dir at race start");
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        {
+        }
+        catch (Exception ex)
+        {
+            LogJobLive(id, "warn", $"{siteName}: could not create release dir at race start: {FirstLineOf(ex.Message)}");
+        }
+        finally
+        {
+            if (conn is not null) pool.Drop(conn);
+            _racePrecreates.TryRemove(operation, out _);
+            if (locked) { try { dirSem.Release(); } catch (ObjectDisposedException) { } }
+        }
+    }
+
+    // ---- pre routing -------------------------------------------------------------------
+    // A release is a pre from site P when its group (text after the last '-') is one of
+    // P's affils (GROUP or GROUP_iNT). If P has pre targets the race is rewritten here:
+    //   Only  -> source P, targets = requested sites that are pre targets (others dropped)
+    //   First -> source P, all requested sites, pre targets flagged to be served first
+    // Returns a log line, or null when the release isn't a routed pre.
+    private string? ApplyPreRouting(SpreadRequest req)
+    {
+        var release = string.IsNullOrWhiteSpace(req.Label) ? RemoteBase(req.SourcePath) : req.Label;
+        var names = new[] { req.FromSite }.Concat(req.ToSites ?? new())
+            .Select(n => (n ?? "").Trim()).Where(n => n.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var pre = PreSourceFor(release, names);
+        if (pre is null) return null;
+        var (site, group) = pre.Value;
+        var targets = names.Where(n => !n.Equals(site.Name, StringComparison.OrdinalIgnoreCase) &&
+            site.PreTargetSites.Contains(n, StringComparer.OrdinalIgnoreCase)).ToList();
+        var others = names.Where(n => !n.Equals(site.Name, StringComparison.OrdinalIgnoreCase) &&
+            !targets.Contains(n, StringComparer.OrdinalIgnoreCase)).ToList();
+        req.SitePaths ??= new();
+        var originalSource = req.FromSite;
+        var destination = string.IsNullOrWhiteSpace(req.DestPath) ? req.SourcePath : req.DestPath;
+        foreach (var name in names)
+            if (!req.SitePaths.TryGetValue(name, out var mapped) || string.IsNullOrWhiteSpace(mapped))
+                req.SitePaths[name] = name.Equals(originalSource, StringComparison.OrdinalIgnoreCase) ? req.SourcePath : destination;
+        req.SourcePath = req.SitePaths[site.Name];
+        req.FromSite = site.Name;
+        if (site.PreRouteMode == PreRouteMode.Only)
+        {
+            if (targets.Count == 0)
+                throw new IOException($"pre {release} from {site.Name} (group {group}): none of the requested sites are pre targets of {site.Name}");
+            req.ToSites = targets;
+            return $"pre from {site.Name} (group {group}): only to {string.Join(", ", targets)}" +
+                (others.Count > 0 ? $"; not sent to {string.Join(", ", others)}" : "");
+        }
+        req.ToSites = targets.Concat(others).ToList();
+        req.PreFirstTargets = targets;
+        return targets.Count == 0
+            ? $"pre from {site.Name} (group {group}): no pre target in this race, normal spread"
+            : $"pre from {site.Name} (group {group}): {string.Join(", ", targets)} first";
+    }
+
+    // Single src->dst races (UDP "fxp"): refuse a pre to a site outside an Only list.
+    private void EnsurePreRouteAllows(TransferRequest req)
+    {
+        var release = string.IsNullOrWhiteSpace(req.Label) ? RemoteBase(req.SourcePath) : req.Label;
+        var names = req.MeshSites.Count > 1 ? req.MeshSites : new List<string> { req.FromSite, req.ToSite };
+        var src = PreSourceFor(release, names)?.Site;
+        if (src is null || src.PreTargetSites.Count == 0 || src.PreRouteMode != PreRouteMode.Only) return;
+        var group = ReleaseGroup(release);
+        if (group.Length == 0 || !src.Affils.Any(a => GroupMatchesAffil(group, a))) return;
+        var disallowed = names.FirstOrDefault(n => !n.Equals(src.Name, StringComparison.OrdinalIgnoreCase) &&
+            !src.PreTargetSites.Contains(n, StringComparer.OrdinalIgnoreCase));
+        if (disallowed is not null)
+            throw new IOException($"pre {release} from {src.Name} (group {group}): {disallowed} is not a pre target of {src.Name}");
+    }
+
+    private (Site Site, string Group)? PreSourceFor(string release, IEnumerable<string> siteNames)
+    {
+        var group = ReleaseGroup(release);
+        if (group.Length == 0) return null;
+        foreach (var name in siteNames)
+        {
+            var site = _store.Site(name);
+            if (site is null || site.PreTargetSites.Count == 0) continue;
+            if (site.Affils.Any(a => GroupMatchesAffil(group, a))) return (site, group);
+        }
+        return null;
+    }
+
+    private static string ReleaseGroup(string? release)
+    {
+        var name = RemoteBase((release ?? "").Trim().TrimEnd('/'));
+        var dash = name.LastIndexOf('-');
+        return dash < 0 || dash == name.Length - 1 ? "" : name[(dash + 1)..].Trim();
+    }
+
+    private static bool GroupMatchesAffil(string group, string? affil)
+    {
+        affil = (affil ?? "").Trim();
+        if (affil.Length == 0) return false;
+        return group.Equals(affil, StringComparison.OrdinalIgnoreCase) ||
+               group.Equals(affil + "_iNT", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task EnsureDestDirAsync(FtpClient dst, string destRoot, string relParent, HashSet<string> made, string id)
@@ -3909,6 +4648,16 @@ public sealed partial class WeaveEngine
 
     private static bool IsUnreadableSfv(RaceFile file) =>
         file.Size < 8 && file.Name.EndsWith(".sfv", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool SfvExcludesSingleByte(string crc)
+    {
+        if (crc.Length != 8 || !uint.TryParse(crc, System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture, out var expected)) return false;
+        // Pending uploads can appear as 1 byte on both peers. There are only 256
+        // possible one-byte CRC32s: rule out impossible completion, not live RETR.
+        // This is a size plausibility check, not verification of the remote data.
+        return !LocalCrc32Table.Any(value => ~(value ^ 0x00ffffffu) == expected);
+    }
 
     private static int RegisterUploadBusy(
         ConcurrentDictionary<string, (int Count, long Size)> retries, string key, long size)
@@ -4044,6 +4793,7 @@ public sealed partial class WeaveEngine
         Log("transfer", req.Site + " > local", "info", $"queued download {req.SourcePath} -> {req.DestPath}");
         var run = RegisterJobToken(saved.Id);
         if (queueOnly) PauseJob(saved.Id);
+        HoldForGlobalStop(saved.Id);
         ScheduleDownload(saved.Id, req, run);
         return _store.Job(saved.Id)!;
     }
@@ -4129,16 +4879,9 @@ public sealed partial class WeaveEngine
             var job = _store.Job(id) ?? throw new IOException("job vanished");
             var dest = job.Request.DestPath;
             var settings = _store.Settings();
-            var skiplist = MergePatternLists(settings.GlobalSkiplist, site.Skiplist);
+            var skiplist = MergeSkiplists(settings.GlobalSkiplist, site.Skiplist);
             var skipEmptyFolders = settings.SkipEmptyFolders;
             var downloadWasDirectory = false;
-
-            if (SkiplistMatches(req.SourcePath, RemoteBase(req.SourcePath), skiplist))
-            {
-                LogJob(id, "info", $"skiplist skipped {req.SourcePath}");
-                FinishJob(id, null, run);
-                return;
-            }
 
             // Phase 1: collect the full file list over one connection.
             var files = new List<DlFile>();
@@ -4147,9 +4890,15 @@ public sealed partial class WeaveEngine
             {
                 lister = await pool.BorrowAsync(ct).ConfigureAwait(false);
                 var (code, _) = await lister.CommandAsync("CWD " + req.SourcePath).ConfigureAwait(false);
-                if (code / 100 == 2)
+                downloadWasDirectory = code / 100 == 2;
+                if (SkiplistMatches(req.SourcePath, RemoteBase(req.SourcePath), skiplist, downloadWasDirectory))
                 {
-                    downloadWasDirectory = true;
+                    LogJob(id, "info", $"skiplist skipped {req.SourcePath}");
+                    FinishJob(id, null, run);
+                    return;
+                }
+                if (downloadWasDirectory)
+                {
                     await CollectDownloadFilesAsync(lister, id, req.SourcePath, dest, 16, skiplist, skipEmptyFolders, files, ct).ConfigureAwait(false);
                 }
                 else
@@ -4413,7 +5162,7 @@ public sealed partial class WeaveEngine
     }
 
     private async Task CollectDownloadFilesAsync(FtpClient client, string id, string remotePath, string localPath,
-        int depth, List<string> skiplist, bool skipEmptyFolders, List<DlFile> files, CancellationToken ct)
+        int depth, List<SkiplistEntry> skiplist, bool skipEmptyFolders, List<DlFile> files, CancellationToken ct)
     {
         if (depth <= 0) throw new IOException($"maximum directory depth reached at {remotePath}");
         ct.ThrowIfCancellationRequested();
@@ -4429,7 +5178,7 @@ public sealed partial class WeaveEngine
                 LogJob(id, "info", $"skipped incomplete marker {entry.Name}");
                 continue;
             }
-            if (SkiplistMatches(childRemote, entry.Name, skiplist))
+            if (SkiplistMatches(childRemote, entry.Name, skiplist, isDir: entry.Type is "dir" or "link"))
             {
                 LogJob(id, "info", $"skiplist skipped {childRemote}");
                 continue;
@@ -4839,6 +5588,7 @@ public sealed partial class WeaveEngine
         Log("transfer", "local > " + req.Site, "info", $"queued upload {req.SourcePath} -> {req.DestPath}");
         var run = RegisterJobToken(saved.Id);
         if (queueOnly) PauseJob(saved.Id);
+        HoldForGlobalStop(saved.Id);
         ScheduleUpload(saved.Id, req, run);
         return _store.Job(saved.Id)!;
     }
@@ -5121,7 +5871,49 @@ public sealed partial class WeaveEngine
 
     private readonly ConcurrentDictionary<string, JobRunControl> _jobRuns = new();
     private readonly ConcurrentDictionary<string, bool> _jobPaused = new();
+    // Global "stop racing" switch (RaceTrade's start/stop button): when set, the app and
+    // web UI keep running but no transfers happen — running jobs are paused and new
+    // triggers (UDP/API/manual) are created in a held/paused state until racing resumes.
+    private volatile bool _racingPaused;
+    private readonly HashSet<string> _globallyHeldJobs = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool IsRacingPaused => _racingPaused;
+
+    public void PauseRacing()
+    {
+        lock (_raceAnnounceLock)
+        {
+            if (_racingPaused) return;
+            _racingPaused = true;
+            foreach (var job in _store.Jobs())
+                if (!job.Terminal) HoldForGlobalStop(job.Id);
+            Log("system", "", "info", "racing stopped — app stays running; new triggers are held until you start again");
+            NotifyChanged();
+        }
+    }
+
+    public void ResumeRacing()
+    {
+        lock (_raceAnnounceLock)
+        {
+            if (!_racingPaused) return;
+            _racingPaused = false;
+            foreach (var id in _globallyHeldJobs.ToArray())
+                if (_store.JobHeader(id) is { Paused: true, Terminal: false }) ResumeJob(id);
+            _globallyHeldJobs.Clear();
+            Log("system", "", "info", "racing started");
+            NotifyChanged();
+        }
+    }
+
+    private void HoldForGlobalStop(string id)
+    {
+        lock (_raceAnnounceLock)
+            if (_racingPaused && _store.JobHeader(id) is { Paused: false, Terminal: false } && PauseJob(id))
+                _globallyHeldJobs.Add(id);
+    }
     private readonly ManualTransferQueue _manualTransferQueue = new();
+    private readonly ManualTransferQueue _raceTransferQueue = new();
     private readonly object _jobRunLock = new();
 
     private JobRunControl RegisterJobToken(string id)
@@ -5157,9 +5949,9 @@ public sealed partial class WeaveEngine
                     lock (_jobRunLock)
                     {
                         if (!IsCurrentJobRun(id, run)) return;
-                        var job = _store.Job(id);
+                        var job = _store.JobHeader(id);
                         if (job is null || job.Terminal) return;
-                        if (job.Paused) continue;
+                        if (job.Paused || job.State == JobState.Queued) continue;
 
                         var lastActivity = job.HeartbeatAt != default
                             ? job.HeartbeatAt
@@ -5211,25 +6003,46 @@ public sealed partial class WeaveEngine
 
     public bool PauseJob(string id)
     {
-        var job = _store.Job(id);
+        lock (_raceAnnounceLock)
+        {
+            _globallyHeldJobs.Remove(id);
+            return PauseJobCore(id);
+        }
+    }
+
+    private bool PauseJobCore(string id)
+    {
+        var job = _store.JobHeader(id);
         if (job is null || job.Terminal) return false;
         _jobPaused[id] = true;
         _meshScoreboard.SetPaused(id, true);
         lock (_poolLock)
             foreach (var pool in _pools.Values) pool.SetMeshDemand(id, false, false);
-        _store.UpdateJob(id, j => j.Paused = true);
+        _store.UpdateJob(id, j => j.Paused = true, headerOnly: true);
         _manualTransferQueue.SetPaused(id, true);
+        _raceTransferQueue.SetPaused(id, true);
         LogJob(id, "info", "job paused (finishes the file in flight, then waits)");
         return true;
     }
 
     public bool ResumeJob(string id)
     {
+        lock (_raceAnnounceLock)
+        {
+            if (_racingPaused) return false;
+            _globallyHeldJobs.Remove(id);
+            return ResumeJobCore(id);
+        }
+    }
+
+    private bool ResumeJobCore(string id)
+    {
         _jobPaused.TryRemove(id, out _);
         _meshScoreboard.SetPaused(id, false);
-        var job = _store.UpdateJob(id, j => j.Paused = false);
+        var job = _store.UpdateJob(id, j => j.Paused = false, headerOnly: true);
         if (job is null) return false;
         _manualTransferQueue.SetPaused(id, false);
+        _raceTransferQueue.SetPaused(id, false);
         LogJob(id, "info", "job resumed");
         return true;
     }
@@ -5238,31 +6051,52 @@ public sealed partial class WeaveEngine
 
     private static ManualTransferQueue.Limit LocalTransferLimit(string site) => new("local:" + site.Trim(), 1);
 
-    private Task<bool> ScheduleTransfer(string id, TransferRequest req, JobRunControl run, ManualTransferQueue.Limit? batch = null)
+    private Task<bool> ScheduleTransfer(string id, TransferRequest req, JobRunControl run,
+        ManualTransferQueue.Limit? batch = null, bool retry = false, CancellationToken batchToken = default)
     {
-        if (req.Race)
-        {
-            ArmJobWatchdog(id, run);
-            return Task.Run(() => RunTransferJobAsync(id, req, run.Token, run));
-        }
-        var limit = new ManualTransferQueue.Limit("fxp", _store.Settings().MaxConcurrentFxpJobs);
-        var turn = _manualTransferQueue.Enqueue(id, run.Token, IsJobPaused(id), batch is null ? new[] { limit } : new[] { limit, batch });
+        var linked = batchToken.CanBeCanceled ? CancellationTokenSource.CreateLinkedTokenSource(batchToken, run.Token) : null;
+        var token = linked?.Token ?? run.Token;
+        var settings = _store.Settings();
+        var limit = new ManualTransferQueue.Limit(req.Race ? "race" : "fxp",
+            req.Race ? settings.MaxConcurrentRaceJobs : settings.MaxConcurrentFxpJobs);
+        var queue = req.Race ? _raceTransferQueue : _manualTransferQueue;
+        // Fresh announces go before queued recovery work, with FIFO order within each class.
+        // Pending jobs do not start listers, allocate workers or run their watchdog yet.
+        var turn = queue.Enqueue(id, token, IsJobPaused(id), retry ? 1 : 0,
+            batch is null ? new[] { limit } : new[] { limit, batch });
         return Task.Run(async () =>
         {
             try
             {
                 using var lease = await turn.ConfigureAwait(false);
-                run.Token.ThrowIfCancellationRequested();
-                if (_store.Job(id) is not { Terminal: false }) return false;
-                await WaitWhilePausedAsync(id, run.Token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                if (!IsCurrentJobRun(id, run) || _store.JobHeader(id) is not { Terminal: false }) return false;
+                await WaitWhilePausedAsync(id, token).ConfigureAwait(false);
                 ArmJobWatchdog(id, run);
-                return await RunTransferJobAsync(id, req, run.Token, run).ConfigureAwait(false);
+                using var racePermit = req.Race ? new RaceRunPermit(lease, async () =>
+                {
+                    var next = await queue.Enqueue(id, token, IsJobPaused(id), 1,
+                        batch is null ? new[] { limit } : new[] { limit, batch }).ConfigureAwait(false);
+                    try
+                    {
+                        token.ThrowIfCancellationRequested();
+                        if (!IsCurrentJobRun(id, run)) throw new OperationCanceledException(token);
+                        _store.UpdateJobTransient(id, j => { if (!j.Terminal) j.State = JobState.Running; });
+                        NotifyChangedThrottled();
+                        return next;
+                    }
+                    catch { next.Dispose(); throw; }
+                }) : null;
+                return await RunTransferJobAsync(id, req, token, run, racePermit).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
+                if (batchToken.IsCancellationRequested)
+                    CancelJobInternal(id, "race batch stopped after completion marker", run);
                 CleanupCancelledJobRun(id, run);
                 return false;
             }
+            finally { linked?.Dispose(); }
         });
     }
 
@@ -5280,7 +6114,7 @@ public sealed partial class WeaveEngine
 
     private void LogJob(string id, string level, string message)
     {
-        var job = _store.UpdateJob(id, j => AppendJobEvent(j, level, message));
+        var job = _store.UpdateJob(id, j => AppendJobEvent(j, level, message), headerOnly: true);
         var route = job is null ? id : TransferRoute(job.Request);
         Log("transfer", route, level, message);
         NotifyChanged();
@@ -5477,31 +6311,20 @@ public sealed partial class WeaveEngine
         return Regex.IsMatch(name, token, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
-    private static bool SkiplistMatches(string path, string name, IEnumerable<string> patterns)
+    // Path/suffix check for a listing entry. isDir null = type unknown: blocked when a Deny rule
+    // hits it as either a file or a directory. Allow/Unique never block here (Unique is
+    // decided per destination dir via SkiplistRules.UniqueBlocks).
+    private static bool SkiplistMatches(string path, string name, IReadOnlyList<SkiplistEntry> entries, bool? isDir = null)
     {
-        foreach (var pattern in patterns)
-        {
-            var p = (pattern ?? "").Trim();
-            if (p.Length == 0) continue;
-            if (SkipPatternMatches(name, p) || SkipPatternMatches(path, p))
-                return true;
-        }
-        return false;
+        var entry = string.IsNullOrWhiteSpace(path) ? name : path;
+        if (isDir is bool dir) return SkiplistRules.Evaluate(entries, entry, dir).Verdict == SkiplistVerdict.Deny;
+        return SkiplistRules.Evaluate(entries, entry, false).Verdict == SkiplistVerdict.Deny ||
+               SkiplistRules.Evaluate(entries, entry, true).Verdict == SkiplistVerdict.Deny;
     }
 
-    private static bool SkipPatternMatches(string value, string pattern)
-    {
-        value = (value ?? "").Trim();
-        if (value.Length == 0) return false;
-        if (pattern.Contains('*') || pattern.Contains('?'))
-        {
-            var wildcard = "^" + Regex.Escape(pattern)
-                .Replace("\\*", ".*")
-                .Replace("\\?", ".") + "$";
-            return Regex.IsMatch(value, wildcard, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        }
-        return value.Contains(pattern, StringComparison.OrdinalIgnoreCase);
-    }
+    // Global rules first, then the site's own: one ordered list, first match wins.
+    private static List<SkiplistEntry> MergeSkiplists(IEnumerable<SkiplistEntry>? global, IEnumerable<SkiplistEntry>? site) =>
+        SkiplistEntry.NormalizeList((global ?? Enumerable.Empty<SkiplistEntry>()).Concat(site ?? Enumerable.Empty<SkiplistEntry>()));
 
     private static List<string> MergePatternLists(params IEnumerable<string>?[] lists)
     {

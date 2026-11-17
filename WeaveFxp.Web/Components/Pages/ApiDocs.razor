@@ -17,7 +17,7 @@
             <div>
                 <span class="doc-kicker">Base URL</span>
                 <h2>@BaseUrl</h2>
-                <p>Use JSON bodies for POST/PUT endpoints. The API listener is plain HTTP for LAN tools; put HTTPS in front with a reverse proxy if you expose it outside your network.</p>
+                <p>Use JSON bodies for POST/PUT endpoints. The dedicated JSON API uses HTTPS with its own certificate. Configure your client to trust that certificate. The web UI can listen separately over HTTP.</p>
             </div>
         </div>
 
@@ -49,7 +49,7 @@
 @code {
     private AppSettings Settings => Engine.Settings(true);
     private string BaseUrl => Settings.EnableHttpsJsonApi
-        ? $"http://{ApiHostForDocs(Settings)}:{Settings.HttpsJsonApiPort}"
+        ? $"https://{ApiHostForDocs(Settings)}:{Settings.HttpsJsonApiPort}"
         : $"http://{WebHostForDocs(Settings.WebBindAddress)}:{Settings.WebPort}";
     private string CurlPrefix => "curl";
     private string AuthHeader => Settings.ApiPasswordSet ? " -H \"X-WeaveFXP-API-Key: <password>\"" : "";
@@ -86,15 +86,26 @@
         new ApiGroup("Transfers", new[]
         {
             new ApiExample("Start FXP", "Start a site-to-site transfer.", "POST",
-                $"{CurlPrefix} -X POST {BaseUrl}/api/fxp{JsonHeaders} -d \"{{\\\"from_site\\\":\\\"SITE_A\\\",\\\"to_site\\\":\\\"SITE_B\\\",\\\"source_path\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"dest_path\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
+                $"{CurlPrefix} -X POST {BaseUrl}/api/fxp{JsonHeaders} -d \"{{\\\"fromSite\\\":\\\"SITE_A\\\",\\\"toSite\\\":\\\"SITE_B\\\",\\\"sourcePath\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"destPath\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
             new ApiExample("Spread/Race", "Send one source to multiple targets.", "POST",
-                $"{CurlPrefix} -X POST {BaseUrl}/api/spread{JsonHeaders} -d \"{{\\\"from_site\\\":\\\"SITE_A\\\",\\\"to_sites\\\":[\\\"SITE_B\\\",\\\"SITE_C\\\"],\\\"source_path\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"dest_path\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"race\\\":true}}\""),
+                $"{CurlPrefix} -X POST {BaseUrl}/api/spread{JsonHeaders} -d \"{{\\\"fromSite\\\":\\\"SITE_A\\\",\\\"toSites\\\":[\\\"SITE_B\\\",\\\"SITE_C\\\"],\\\"sourcePath\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"destPath\\\":\\\"/SECTION/Release.Name-GRP\\\",\\\"race\\\":true}}\""),
             new ApiExample("Local Download", "Download from one site to the configured local download folder.", "POST",
-                $"{CurlPrefix} -X POST {BaseUrl}/api/download{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"source_path\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
+                $"{CurlPrefix} -X POST {BaseUrl}/api/download{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"sourcePath\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
             new ApiExample("Local Upload", "Upload a local file or folder to a configured site.", "POST",
-                $"{CurlPrefix} -X POST {BaseUrl}/api/upload{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"source_path\\\":\\\"C:\\\\\\\\Path\\\\\\\\Release.Name-GRP\\\",\\\"dest_path\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
+                $"{CurlPrefix} -X POST {BaseUrl}/api/upload{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"sourcePath\\\":\\\"C:\\\\\\\\Path\\\\\\\\Release.Name-GRP\\\",\\\"destPath\\\":\\\"/SECTION/Release.Name-GRP\\\"}}\""),
             new ApiExample("Raw FTP Command", "Send SITE commands or other single-line FTP commands.", "POST",
                 $"{CurlPrefix} -X POST {BaseUrl}/api/raw-command{JsonHeaders} -d \"{{\\\"site\\\":\\\"SITE_A\\\",\\\"command\\\":\\\"SITE WHO\\\"}}\""),
+        }),
+        new ApiGroup("Race preparation and monitoring", new[]
+        {
+            new ApiExample("Prepare a race", "Warm site logins without starting transfers. The default expiry is five minutes; ttlSeconds accepts 1-3600.", "POST",
+                "POST /api/prepared-spreads?ttlSeconds=300\n" + """{ "fromSite": "SITE_A", "toSites": ["SITE_B"], "sourcePath": "/SECTION/Release.Name-GRP", "destPath": "/SECTION/Release.Name-GRP", "downloadOnlySites": ["SITE_A"] }"""),
+            new ApiExample("Prepared race actions", "List, explicitly start or cancel a preparation. Current route permissions are checked again when starting.", "GET / POST / DELETE",
+                "GET /api/prepared-spreads\nPOST /api/prepared-spreads/PREPARED_ID/start\nDELETE /api/prepared-spreads/PREPARED_ID"),
+            new ApiExample("Brief jobs", "Read counters without per-file history. The normal job and detail endpoints keep the full history.", "GET",
+                "GET /api/jobs?summary=true"),
+            new ApiExample("Recheck completion", "Read-only FTP verification of a failed race. Fresh SFVs, matching file sizes and destination completion markers must remain stable. No uploads are retried; 409 means completion was not confirmed.", "POST",
+                "POST /api/jobs/JOB_ID/recheck"),
         }),
         new ApiGroup("Queue", new[]
         {

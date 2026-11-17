@@ -5,6 +5,8 @@ using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Collections;
+using System.Reflection;
 using WeaveFxp.Engine.Core;
 using WeaveFxp.Engine.Models;
 
@@ -12,6 +14,8 @@ internal static class MeshIntegration
 {
     public static async Task Run(Action<bool, string> check)
     {
+        await Bidirectional(check, spread: false);
+        await Bidirectional(check, spread: true);
         await using var source = new TransferServer();
         await using var alternate = new TransferServer();
         await using var destination = new TransferServer();
@@ -80,6 +84,77 @@ internal static class MeshIntegration
         }
     }
 
+    private static async Task Bidirectional(Action<bool, string> check, bool spread)
+    {
+        await using var left = new TransferServer();
+        await using var right = new TransferServer();
+        var leftPayload = Enumerable.Repeat((byte)17, 4096).ToArray();
+        var rightPayload = Enumerable.Repeat((byte)29, 2048).ToArray();
+        left.Files["left.r00"] = leftPayload;
+        right.Files["right.r00"] = rightPayload;
+        var sfv = Encoding.ASCII.GetBytes("left.r00 00000000\r\nright.r00 00000000\r\n");
+        left.Files["release.sfv"] = sfv;
+        right.Files["release.sfv"] = sfv;
+        var transferring = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        foreach (var server in new[] { left, right })
+            server.BeforeCommand = async command =>
+            {
+                if (!command.StartsWith("PRET STOR ")) return;
+                transferring.TrySetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            };
+
+        var path = Path.Combine(Path.GetTempPath(), "weave-two-site-tests-" + Guid.NewGuid().ToString("N"), "state.json");
+        var engine = new WeaveEngine(path);
+        var settings = engine.Settings(false);
+        settings.RacePollIntervalMs = 25;
+        settings.RaceMaxIdleCycles = 100;
+        settings.GlobalSkiplist.Clear();
+        engine.UpdateSettings(settings);
+        engine.AddSite(left.Site("left", true, true));
+        engine.AddSite(right.Site("right", true, true));
+        var job = spread
+            ? engine.StartSpread(new SpreadRequest
+            {
+                Race = true, FromSite = "left", ToSites = new() { "right" },
+                SourcePath = "/left-release", DestPath = "/right-release", ViaApi = true
+            }).Jobs.Single()
+            : engine.StartFxp(new TransferRequest
+            {
+                Race = true, FromSite = "left", ToSite = "right",
+                SourcePath = "/left-release", DestPath = "/right-release",
+                MeshSites = new() { "left", "right" }, ViaApi = true
+            });
+        try
+        {
+            await transferring.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var board = typeof(WeaveEngine).GetField("_meshScoreboard", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(engine)!;
+            var sync = board.GetType().GetField("_sync", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(board)!;
+            lock (sync)
+            {
+                var owners = (IDictionary)board.GetType().GetField("_owners", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(board)!;
+                check(owners.Contains(job.Id), $"two-site race registers with the global scoreboard (spread={spread})");
+            }
+            release.TrySetResult();
+            await Until(() => engine.Job(job.Id)!.Terminal, engine, job.Id);
+            var completed = engine.Job(job.Id)!;
+            check(completed.State == JobState.Succeeded, $"two-site bidirectional race completes (spread={spread})");
+            check(left.Files.TryGetValue("right.r00", out var receivedLeft) && receivedLeft.SequenceEqual(rightPayload) &&
+                right.Files.TryGetValue("left.r00", out var receivedRight) && receivedRight.SequenceEqual(leftPayload),
+                $"two-site race repairs complementary files in both directions (spread={spread})");
+            check(completed.Files.Any(file => file.Status == "done" && file.FromSite == "left" && file.ToSite == "right") &&
+                completed.Files.Any(file => file.Status == "done" && file.FromSite == "right" && file.ToSite == "left"),
+                $"two-site race records both transfer routes (spread={spread})");
+        }
+        finally
+        {
+            release.TrySetResult();
+            if (engine.Job(job.Id) is { Terminal: false }) engine.CancelJob(job.Id);
+            await Until(() => engine.Job(job.Id)!.Terminal, engine, job.Id);
+        }
+    }
+
     private static async Task Until(Func<bool> condition, WeaveEngine engine, string job)
     {
         var deadline = DateTime.UtcNow.AddSeconds(12);
@@ -104,6 +179,8 @@ internal sealed class TransferServer : IAsyncDisposable
     public ConcurrentDictionary<string, byte[]> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Func<string, string?>? Reject { get; set; }
     public Func<string, string?>? Reply { get; set; }
+    public Func<string, string?>? TransferFinalReply { get; set; }
+    public Func<string, Task>? BeforeTransferFinalReply { get; set; }
     public Func<string, Task>? BeforeCommand { get; set; }
     public Func<string, List<RemoteEntry>>? Listing { get; set; }
     public Func<Task>? AfterListingSnapshot { get; set; }
@@ -144,6 +221,8 @@ internal sealed class TransferServer : IAsyncDisposable
         TcpListener? passive = null;
         IPEndPoint? active = null;
         var cwd = "/";
+        var sscn = false;
+        var cpsv = false;
         using (client)
         try
         {
@@ -189,7 +268,13 @@ internal sealed class TransferServer : IAsyncDisposable
                         }
                         await writer.WriteLineAsync("213 End");
                         break;
+                    case "SSCN":
+                        sscn = arg == "ON";
+                        await writer.WriteLineAsync("200 SSCN accepted");
+                        break;
+                    case "CPSV":
                     case "PASV":
+                        cpsv = parts[0] == "CPSV";
                         passive?.Stop();
                         passive = new TcpListener(IPAddress.Loopback, 0);
                         passive.Start();
@@ -201,9 +286,17 @@ internal sealed class TransferServer : IAsyncDisposable
                         active = new IPEndPoint(IPAddress.Loopback, address[4] * 256 + address[5]);
                         await writer.WriteLineAsync("200 PORT accepted");
                         break;
+                    case "SIZE":
+                        if (Files.TryGetValue(arg.Split('/').Last(), out var sized))
+                            await writer.WriteLineAsync("213 " + sized.Length);
+                        else await writer.WriteLineAsync("550 file not found");
+                        break;
                     case "RETR":
                     case "STOR":
+                    case "LIST":
                         byte[]? download = null;
+                        if (parts[0] == "LIST") download = Encoding.ASCII.GetBytes(string.Join("\r\n",
+                            Files.Select(f => $"-rw-r--r-- 1 user group {f.Value.Length} Sep 05 12:00 {f.Key}")) + "\r\n");
                         if (parts[0] == "RETR" && !Files.TryGetValue(arg.Split('/').Last(), out download))
                         {
                             await writer.WriteLineAsync("550 file not found");
@@ -217,8 +310,12 @@ internal sealed class TransferServer : IAsyncDisposable
                                 ? await passive.AcceptTcpClientAsync(deadline.Token) : new TcpClient();
                             if (passive is null) await data.ConnectAsync(active!.Address, active.Port, deadline.Token);
                             var name = arg.Split('/').Last();
-                            using var dataStream = await ServerStream(data);
-                            if (parts[0] == "RETR") await dataStream.WriteAsync(download!, deadline.Token);
+                            using var dataStream = await ServerStream(data, sscn || cpsv);
+                            if (parts[0] != "STOR")
+                            {
+                                await dataStream.WriteAsync(download!, deadline.Token);
+                                if (dataStream is SslStream tls) await tls.ShutdownAsync();
+                            }
                             else
                             {
                                 using var bytes = new MemoryStream();
@@ -229,7 +326,9 @@ internal sealed class TransferServer : IAsyncDisposable
                         passive?.Stop();
                         passive = null;
                         active = null;
-                        await writer.WriteLineAsync("226 transfer complete");
+                        cpsv = false;
+                        if (BeforeTransferFinalReply is { } finalDelay) await finalDelay(line);
+                        await writer.WriteLineAsync(TransferFinalReply?.Invoke(line) ?? "226 transfer complete");
                         break;
                     default: await writer.WriteLineAsync("200 OK"); break;
                 }
@@ -237,6 +336,9 @@ internal sealed class TransferServer : IAsyncDisposable
         }
         catch (OperationCanceledException) { }
         catch (IOException) { }
+        // A cancelled peer can close its passive listener before this fixture
+        // connects. That ends the session, just like a broken control stream.
+        catch (SocketException) { }
         finally { passive?.Stop(); }
     }
 
@@ -250,13 +352,16 @@ internal sealed class TransferServer : IAsyncDisposable
         _stop.Dispose();
     }
 
-    private async Task<Stream> ServerStream(TcpClient client)
+    private async Task<Stream> ServerStream(TcpClient client, bool tlsClient = false)
     {
         if (_certificate is null) return client.GetStream();
-        var ssl = new SslStream(client.GetStream());
+        var ssl = new SslStream(client.GetStream(), false, (_, _, _, _) => true);
         try
         {
-            await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = _certificate }, _stop.Token);
+            if (tlsClient)
+                await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "localhost" }, _stop.Token);
+            else
+                await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = _certificate }, _stop.Token);
             return ssl;
         }
         catch { ssl.Dispose(); throw; }

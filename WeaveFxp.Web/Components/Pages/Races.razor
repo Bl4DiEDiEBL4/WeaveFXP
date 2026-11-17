@@ -9,7 +9,7 @@
         <div>
             <div class="eyebrow">Racing</div>
             <h2><span class="title-icon">⚑</span> Races</h2>
-            <p class="page-sub">@ActiveGroups.Count running · @FilteredGroups.Count race(s) total. The browser queue only shows manual transfers.</p>
+            <p class="page-sub">@RaceGroups.Count(r => RaceState(r) == JobState.Running) running · @RaceGroups.Count(r => RaceState(r) == JobState.Queued) queued · @FilteredGroups.Count race(s) total. The browser queue only shows manual transfers.</p>
         </div>
         <div class="page-actions">
             <button class="secondary" @onclick="Refresh"><span class="btn-icon">↻</span> Refresh</button>
@@ -100,6 +100,7 @@
                                 }
                             </td>
                             <td class="col-actions" @onclick:stopPropagation="true">
+                                <button class="secondary slim" title="Remove sites, delete own/all files, abort, reset, add a site" @onclick="() => OpenActions(race)">Actions</button>
                                 @if (RaceActive(race))
                                 {
                                     @if (RacePaused(race))
@@ -114,7 +115,7 @@
                                 }
                                 else
                                 {
-                                    <button class="secondary slim" @onclick="() => Retry(race)">Retry</button>
+                                    <button class="secondary slim" disabled="@_retrying.Contains(race.Key)" @onclick="() => Retry(race)">@(_retrying.Contains(race.Key) ? "Queueing…" : "Retry")</button>
                                     <button class="secondary slim danger" @onclick="() => Remove(race)">Remove</button>
                                 }
                             </td>
@@ -124,6 +125,12 @@
                             <tr class="race-log-row">
                                 <td colspan="8">
                                     <div class="race-mesh-summary">
+                                        @if (race.Jobs.Any(j => j.State == JobState.Failed))
+                                        {
+                                            <button class="secondary slim" disabled="@_rechecking.Contains(race.Key)"
+                                                    title="Read-only completion check; does not retry uploads"
+                                                    @onclick="() => Recheck(race)">Recheck</button>
+                                        }
                                         <div class="race-site-list">
                                             <span class="race-summary-label">Sites</span>
                                             @foreach (var site in RaceSites(race))
@@ -144,51 +151,54 @@
                                             }
                                         </div>
                                     </div>
-                                    @if (RaceFiles(race).Count > 0)
+                                    @{ var fileRows = UnifiedFiles(race); }
+                                    @if (fileRows.Count > 0)
                                     {
-                                        <table class="data-table file-table">
+                                        <div class="race-files-scroll">
+                                        <table class="data-table file-table race-unified-files">
                                             <colgroup>
                                                 <col class="file-col-started" />
                                                 <col class="file-col-use" />
                                                 <col class="file-col-route" />
-                                                <col class="file-col-path" />
                                                 <col class="file-col-transferred" />
                                                 <col class="file-col-name" />
                                                 <col class="file-col-left" />
                                                 <col class="file-col-speed" />
                                                 <col class="file-col-done" />
+                                                <col class="file-col-own" />
                                             </colgroup>
                                             <thead>
                                                 <tr>
                                                     <th>Started</th>
                                                     <th>Use</th>
                                                     <th>Route</th>
-                                                    <th>Path</th>
                                                     <th>Transferred</th>
                                                     <th>File</th>
                                                     <th>Left</th>
                                                     <th>Speed</th>
-                                                    <th>Done</th>
+                                                    <th>Status</th>
+                                                    <th title="Uploaded by WeaveFXP">Own upload</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                @foreach (var row in RaceFiles(race))
+                                                @foreach (var row in fileRows)
                                                 {
                                                     var ft = row.Transfer;
-                                                    <tr>
-                                                        <td class="mono">@ft.StartedAt.ToLocalTime().ToString("HH:mm:ss")</td>
-                                                        <td class="mono">@Elapsed(ft)</td>
-                                                        <td class="mono route-cell">@FileRoute(row)</td>
-                                                        <td class="mono path-cell" title="@TransferPath(row.Job, ft)">@TransferPath(row.Job, ft)</td>
-                                                        <td class="mono transferred-cell">@Transferred(ft)</td>
-                                                        <td class="mono file-name" title="@FileTitle(ft)">@ft.Name</td>
-                                                        <td class="mono">@Left(ft)</td>
-                                                        <td class="mono">@FileSpeed(ft)</td>
-                                                        <td><span class="pill @FileStatusClass(ft.Status)">@Done(ft)</span></td>
+                                                    <tr @key="row.Key" class="@(row.Active ? "file-active" : "")" data-file="@row.Name">
+                                                        <td class="mono">@(ft is not null && ft.StartedAt != default ? ft.StartedAt.ToLocalTime().ToString("HH:mm:ss") : "—")</td>
+                                                        <td class="mono">@(ft is not null && (row.Active || ft.Status != "active") ? Elapsed(ft) : "—")</td>
+                                                        <td class="mono route-cell">@(row.Attempt is not null ? FileRoute(row.Attempt) : "—")</td>
+                                                        <td class="mono transferred-cell">@(ft is not null ? Transferred(ft) : $"— / {(row.Manifest?.Size is long size ? HumanSize(size) : "Unknown")}")</td>
+                                                        <td class="mono file-name" title="@UnifiedFileTitle(row)">@row.Name</td>
+                                                        <td class="mono">@(row.Active && ft is not null ? Left(ft) : "—")</td>
+                                                        <td class="mono">@(ft is not null && (row.Active || ft.Status == "done") ? FileSpeed(ft) : "—")</td>
+                                                        <td><span class="pill @UnifiedStatusClass(row)">@UnifiedStatus(row)</span></td>
+                                                        <td class="file-own">@(row.UploadedByUs ? "Yes" : "No")</td>
                                                     </tr>
                                                 }
                                             </tbody>
                                         </table>
+                                        </div>
                                     }
                                     @foreach (var job in race.Jobs)
                                     {
@@ -217,13 +227,34 @@
     <div class="toast show" @key="_toast">@_toast</div>
 }
 
+@if (_actionsJobId is not null)
+{
+    <RaceActions JobId="@_actionsJobId" OnClose="CloseActions" />
+}
+
 @code {
+    private string? _actionsJobId;
+
+    private void OpenActions(RaceGroup race) => _actionsJobId = race.Primary.Id;
+
+    private void CloseActions()
+    {
+        _actionsJobId = null;
+        Refresh();
+    }
+
     private sealed record RaceGroup(string Key, List<Job> Jobs)
     {
         public Job Primary => Jobs[0];
     }
 
     private sealed record RaceFileRow(Job Job, FileTransfer Transfer);
+    private sealed record UnifiedFileRow(string Name, RaceSfvFile? Manifest, RaceFileRow? Attempt, bool UploadedByUs)
+    {
+        public FileTransfer? Transfer => Attempt?.Transfer;
+        public bool Active => Attempt is not null && !Attempt.Job.Terminal && Transfer?.Status == "active";
+        public (string, string, string, string) Key => (Name, Attempt?.Job.Id ?? "", Transfer?.FromSite ?? "", Transfer?.ToSite ?? "");
+    }
     private sealed class RouteSummary
     {
         public required string From { get; init; }
@@ -259,7 +290,10 @@
     protected override void OnParametersSet()
     {
         if (!string.IsNullOrWhiteSpace(SelectedJobId))
+        {
             _open.Add(SelectedJobId);
+            Refresh();
+        }
     }
 
     private void BuildSectionMap()
@@ -298,7 +332,9 @@
 
     private void Refresh()
     {
-        _jobs = Engine.Jobs();
+        var summaries = Engine.JobsForUi();
+        var expanded = summaries.Where(j => _open.Contains(j.Id) || _open.Contains(j.BatchId)).Select(j => j.Id).ToList();
+        _jobs = expanded.Count == 0 ? summaries : Engine.JobsForUi(expanded);
         _raceGroups = _jobs
             .Where(j => j.Type == JobType.Race)
             .GroupBy(j => string.IsNullOrWhiteSpace(j.BatchId) ? j.Id : j.BatchId, StringComparer.OrdinalIgnoreCase)
@@ -331,8 +367,6 @@
         }
     }
 
-    private List<RaceGroup> ActiveGroups => RaceGroups.Where(RaceActive).ToList();
-
     private bool IsOpen(RaceGroup race) =>
         _open.Contains(race.Key) || race.Jobs.Any(j => _open.Contains(j.Id));
 
@@ -342,6 +376,7 @@
         _open.Remove(race.Key);
         foreach (var job in race.Jobs) _open.Remove(job.Id);
         if (!open) _open.Add(race.Key);
+        Refresh();
     }
 
     private static List<RaceFileRow> RaceFiles(RaceGroup race) =>
@@ -351,6 +386,78 @@
                 .Select(f => new RaceFileRow(j, f)))
             .OrderByDescending(x => x.Transfer.StartedAt)
             .ToList();
+
+    private static List<RaceSfvFile> SfvRows(RaceGroup race)
+    {
+        var active = race.Jobs.Where(j => !j.Terminal).SelectMany(j => j.Files
+            .GroupBy(f => f.Name, StringComparer.OrdinalIgnoreCase).Select(g => g.Last()))
+            .Where(f => f.Status == "active").Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return race.Jobs.SelectMany(j => j.SfvFiles).GroupBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new RaceSfvFile
+            {
+                Name = g.Key,
+                Crc = g.Last().Crc,
+                Size = g.Last().Size,
+                Status = active.Contains(g.Key) ? "active" : g.All(f => f.Status == "covered") ? "covered" : g.Last().Status,
+                UploadedByUs = g.Any(f => f.UploadedByUs),
+            }).ToList();
+    }
+
+    private static List<UnifiedFileRow> UnifiedFiles(RaceGroup race)
+    {
+        var attempts = RaceFiles(race).GroupBy(f => f.Transfer.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+        var manifest = SfvRows(race).ToDictionary(f => f.Name, StringComparer.OrdinalIgnoreCase);
+        return manifest.Keys.Union(attempts.Keys, StringComparer.OrdinalIgnoreCase).SelectMany(name =>
+        {
+            manifest.TryGetValue(name, out var sfv);
+            attempts.TryGetValue(name, out var history);
+            // Keep live work ahead of older retries, without hiding files only
+            // known from the SFV or inventing a transfer for an opponent's upload.
+            var own = sfv?.UploadedByUs ?? history?.Any(f => f.Transfer.Status == "done" && f.Transfer.Size > 0) ?? false;
+            var latestRoutes = LatestRouteAttempts(history ?? new()).ToList();
+            var activeRoutes = latestRoutes.Where(f => !f.Job.Terminal && f.Transfer.Status == "active").ToList();
+            if (activeRoutes.Count > 0)
+                return activeRoutes.Select(f => new UnifiedFileRow(name, sfv, f, own));
+            return new[] { new UnifiedFileRow(name, sfv, latestRoutes.OrderByDescending(f => f.Transfer.StartedAt).FirstOrDefault(), own) };
+        }).OrderByDescending(f => f.Active)
+            .ThenByDescending(f => f.Transfer?.StartedAt ?? default)
+            .ThenBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static IEnumerable<RaceFileRow> LatestRouteAttempts(IEnumerable<RaceFileRow> rows) => rows
+        .GroupBy(f => $"{f.Job.Id}\0{f.Transfer.Name}\0{f.Transfer.FromSite}\0{f.Transfer.ToSite}", StringComparer.OrdinalIgnoreCase)
+        .Select(g => g.OrderBy(f => f.Transfer.StartedAt).Last());
+
+    private static string UnifiedStatus(UnifiedFileRow row) => row.Active ? "Uploading"
+        : row.Manifest is not null ? SfvStatus(row.Manifest.Status == "active" ? "unknown" : row.Manifest.Status)
+        : row.Transfer?.Status == "active" ? "Interrupted"
+        : row.Transfer is not null ? Done(row.Transfer) : "Unknown";
+
+    private static string UnifiedStatusClass(UnifiedFileRow row) => row.Active ? "cyan"
+        : row.Manifest is not null ? SfvStatusClass(row.Manifest.Status == "active" ? "unknown" : row.Manifest.Status)
+        : row.Transfer?.Status == "active" ? "red"
+        : row.Transfer is not null ? FileStatusClass(row.Transfer.Status) : "amber";
+
+    private static string UnifiedFileTitle(UnifiedFileRow row)
+    {
+        var title = row.Transfer is not null ? FileTitle(row.Transfer) : row.Name;
+        if (row.Attempt is not null) title += "\n" + TransferPath(row.Attempt.Job, row.Attempt.Transfer);
+        if (row.Manifest is not null) title += "\nCRC32: " + row.Manifest.Crc;
+        return title;
+    }
+
+    private static string SfvStatus(string status) => status switch
+    {
+        "covered" => "Complete", "active" => "Uploading", "waiting" => "Waiting",
+        "missing" => "Missing", _ => "Unknown",
+    };
+
+    private static string SfvStatusClass(string status) => status switch
+    {
+        "covered" => "green", "active" => "cyan", "missing" => "red", _ => "amber",
+    };
 
     private static string Elapsed(FileTransfer ft)
     {
@@ -363,9 +470,9 @@
     {
         if (ft.Status == "active")
         {
-            // Live estimate while the file is in flight: size over elapsed so far.
-            var secs = (DateTime.UtcNow - ft.StartedAt).TotalSeconds;
-            return ft.Size > 0 && secs > 0.3 ? "≤" + Speed(ft.Size / secs) : "…";
+            // Measured LIST deltas, not original file size divided by waiting time.
+            return ft.ProgressObservedAt is DateTime observed && DateTime.UtcNow - observed < TimeSpan.FromSeconds(2)
+                && ft.Bps > 0 ? Speed(ft.Bps) : "…";
         }
         return ft.Bps > 0 ? Speed(ft.Bps) : "—";
     }
@@ -399,9 +506,14 @@
     private static string Transferred(FileTransfer ft) =>
         ft.Status == "done"
             ? $"{HumanSize(ft.Size)} / {HumanSize(ft.Size)}"
-            : $"— / {HumanSize(ft.Size)}";
+            : ft.Status == "active" && ft.ObservedBytes is long observed
+                ? $"{HumanSize(observed)} / {(ft.Size > 1 && ft.Size >= observed ? HumanSize(ft.Size) : "unknown") }"
+                : $"— / {HumanSize(ft.Size)}";
 
-    private static string Left(FileTransfer ft) => ft.Status == "active" ? "…" : "—";
+    private static string Left(FileTransfer ft) =>
+        ft.Status == "active" && ft.ObservedBytes is long observed && ft.Size > observed && ft.Bps > 0
+            ? TimeSpan.FromSeconds(Math.Min(86400, (ft.Size - observed) / ft.Bps)).ToString(@"m\:ss")
+            : ft.Status == "active" ? "…" : "—";
 
     private static string Done(FileTransfer ft) => ft.Status switch
     {
@@ -488,12 +600,16 @@
                     .ToList();
                 foreach (var from in sites)
                     foreach (var to in sites)
-                        if (Engine.TransferAllowed(from, to)) Add(from.Name, to.Name);
+                        if (!(job.Request.DownloadOnlySites ?? new()).Contains(to.Name, StringComparer.OrdinalIgnoreCase) &&
+                            Engine.TransferAllowed(from, to)) Add(from.Name, to.Name);
             }
             else Add(job.Request.FromSite, job.Request.ToSite);
         }
 
-        foreach (var row in RaceFiles(race))
+        var files = RaceFiles(race);
+        var active = LatestRouteAttempts(files).Where(f => !f.Job.Terminal && f.Transfer.Status == "active")
+            .Select(f => f.Transfer).ToHashSet();
+        foreach (var row in files)
         {
             var ft = row.Transfer;
             var from = string.IsNullOrWhiteSpace(ft.FromSite) ? row.Job.Request.FromSite : ft.FromSite;
@@ -501,7 +617,7 @@
             Add(from, to);
             if (!routes.TryGetValue(from + "|" + to, out var route)) continue;
             if (ft.Status == "done") { route.Done++; route.Bytes += Math.Max(0, ft.Size); }
-            if (ft.Status == "active") route.Active++;
+            if (active.Contains(ft)) route.Active++;
         }
         return routes.Values.OrderBy(r => r.From).ThenBy(r => r.To).ToList();
     }
@@ -548,7 +664,31 @@
     private void Pause(RaceGroup race) => RunForRace(race, j => (j.State is JobState.Queued or JobState.Running) && !j.Paused, Engine.PauseJob, "pause");
     private void Resume(RaceGroup race) => RunForRace(race, j => (j.State is JobState.Queued or JobState.Running) && j.Paused, Engine.ResumeJob, "resume");
     private void Stop(RaceGroup race) => RunForRace(race, j => j.State is JobState.Queued or JobState.Running, id => Engine.CancelJob(id, "Stopped by user"), "stop");
-    private void Retry(RaceGroup race) => RunForRace(race, j => j.Terminal, Engine.RetryJob, "retry");
+    private readonly HashSet<string> _retrying = new();
+    private async Task Retry(RaceGroup race)
+    {
+        if (!_retrying.Add(race.Key)) return;
+        var ids = race.Jobs.Where(j => j.Terminal).Select(j => j.Id).ToArray();
+        try
+        {
+            var failed = await Task.Run(() => ids.Count(id => !Engine.RetryJob(id)));
+            if (failed > 0) Toast($"Could not retry {failed} race route(s)");
+        }
+        finally { _retrying.Remove(race.Key); }
+    }
+    private readonly HashSet<string> _rechecking = new();
+    private async Task Recheck(RaceGroup race)
+    {
+        if (!_rechecking.Add(race.Key)) return;
+        try
+        {
+            var confirmed = 0;
+            foreach (var job in race.Jobs.Where(j => j.State == JobState.Failed))
+                if (await Engine.RecheckRaceAsync(job.Id)) confirmed++;
+            Toast(confirmed > 0 ? $"Verified complete: {confirmed} route(s)" : "No stable complete evidence yet");
+        }
+        finally { _rechecking.Remove(race.Key); }
+    }
     private void Remove(RaceGroup race) => RunForRace(race, j => j.Terminal, Engine.RemoveJob, "remove");
 
     private void RunForRace(RaceGroup race, Func<Job, bool> select, Func<string, bool> action, string verb)
@@ -638,7 +778,7 @@
     private static long RaceRacedBytes(RaceGroup race) => race.Jobs.Sum(RaceRacedBytes);
 
     private static int RaceTotalFiles(Job job) =>
-        Math.Max(job.FilesTotal, job.Files
+        job.RaceCoverageKnown ? job.FilesTotal : Math.Max(job.FilesTotal, job.Files
             .Where(f => !IsMissingMarkerRow(f))
             .Select(f => f.Name)
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -646,6 +786,7 @@
 
     private static int RaceCoveredFiles(Job job)
     {
+        if (job.RaceCoverageKnown) return job.FilesCovered;
         var coveredNames = job.Files
             .Where(f => !IsMissingMarkerRow(f) && f.Status is "done" or "dupe")
             .Select(f => f.Name)
@@ -667,7 +808,9 @@
 
     private static string RaceRuntime(RaceGroup race)
     {
-        var start = race.Jobs.Min(j => j.StartedAt == default ? j.CreatedAt : j.StartedAt);
+        if (RaceState(race) == JobState.Queued) return "—";
+        var start = race.Jobs.Where(j => j.StartedAt != default).Select(j => j.StartedAt)
+            .DefaultIfEmpty(RaceCreatedAt(race)).Min();
         if (start == default) return "—";
         var end = RaceActive(race)
             ? DateTime.UtcNow

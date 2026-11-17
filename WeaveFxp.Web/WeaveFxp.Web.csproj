@@ -4,10 +4,13 @@
     <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>WeaveFxp.Web</RootNamespace>
     <AssemblyName>WeaveFXP</AssemblyName>
-    <Version>1.0.3</Version>
-    <AssemblyVersion>1.0.3.0</AssemblyVersion>
-    <FileVersion>1.0.3.0</FileVersion>
-    <InformationalVersion>1.0.3</InformationalVersion>
+    <!-- Explorer starts the Windows app without creating a lifetime-owning console.
+         Linux builds keep the normal console host. -->
+    <OutputType Condition="'$(RuntimeIdentifier)' == 'win-x64' Or ('$(RuntimeIdentifier)' == '' And '$(OS)' == 'Windows_NT')">WinExe</OutputType>
+    <Version>1.0.4</Version>
+    <AssemblyVersion>1.0.4.0</AssemblyVersion>
+    <FileVersion>1.0.4.0</FileVersion>
+    <InformationalVersion>1.0.4</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

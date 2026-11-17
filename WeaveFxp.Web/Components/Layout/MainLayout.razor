@@ -15,10 +15,14 @@
 
         <section class="status-card">
             <div class="status-title">ENGINE STATUS</div>
-            <div class="status-line"><span class="status-dot on"></span> Running</div>
-            <button class="status-action danger" @onclick="StopEngine">
-                <span class="nav-glyph">■</span>
-                Stop engine
+            <div class="status-line"><span class="status-dot @(Engine.IsRacingPaused ? "" : "on")"></span> @(Engine.IsRacingPaused ? "Stopped" : "Running")</div>
+            <button class="status-action" @onclick="ToggleRacing">
+                <span class="nav-glyph">@(Engine.IsRacingPaused ? "▶" : "■")</span>
+                @(Engine.IsRacingPaused ? "Start racing" : "Stop racing")
+            </button>
+            <button class="status-action danger" @onclick="QuitApp">
+                <span class="nav-glyph">⏻</span>
+                Quit WeaveFXP
             </button>
         </section>
 
@@ -154,7 +158,15 @@
         await Js.InvokeVoidAsync("weaveFxp.setPalette", CurrentPalette.Id);
     }
 
-    private void StopEngine() => AppLifetime.StopApplication();
+    // Stop/Start racing (RaceTrade-style): halts all transfers but keeps the app and
+    // this web UI running. Quit is the separate button that actually exits WeaveFXP.
+    private void ToggleRacing()
+    {
+        if (Engine.IsRacingPaused) Engine.ResumeRacing();
+        else Engine.PauseRacing();
+    }
+
+    private void QuitApp() => AppLifetime.StopApplication();
 
     private sealed record Palette(string Id, string Label);
 }

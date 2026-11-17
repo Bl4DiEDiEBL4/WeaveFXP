@@ -20,114 +20,10 @@
         </div>
     </header>
 
-    <section class="settings-overview card-grid">
-        <article class="card">
-            <div class="card-title">WEB ACCESS</div>
-            <table class="info-table">
-                <tbody>
-                    <tr><td>Listening on</td><td>@_form.WebBindAddress:@_form.WebPort</td></tr>
-                    <tr><td>Startup</td><td>@(_form.AutoOpenWebUi ? "Open WebUI" : "Tray only")</td></tr>
-                    <tr><td>Reachable from</td><td><span class="pill @(_form.WebBindAddress is "127.0.0.1" or "localhost" ? "on" : "busy")">@ReachLabel()</span></td></tr>
-                    <tr><td>Version</td><td>v@(Engine.Version)</td></tr>
-                </tbody>
-            </table>
-            <p class="hint">Web bind/port changes are read at startup, so save and restart the exe after changing them.</p>
-        </article>
-
-        <article class="card">
-            <div class="card-title-row">
-                <div class="card-title">ENGINE</div>
-                <button type="button" class="secondary slim panel-save-button" @onclick="Save">
-                    <span class="btn-icon">▣</span>
-                    Save
-                </button>
-            </div>
-            <label class="opt"><input type="checkbox" @bind="_form.DebugLogging" /> <span><span class="opt-name">Debug logging</span><span class="fh">Verbose diagnostics for troubleshooting.</span></span></label>
-            <label class="opt"><input type="checkbox" @bind="_form.UseActiveModeAddress" /> <span><span class="opt-name">Active address</span><span class="fh">Use the configured active-mode IP when needed.</span></span></label>
-            <label class="compact-field">Hot JSON jobs<input type="number" min="25" max="150" @bind="_form.StoredJobHistoryLimit" /></label>
-            <p class="hint">Older completed jobs are moved to the SQLite history archive.</p>
-            <label class="compact-field">Completed jobs to keep<input type="number" min="1" max="100000" @bind="_form.CompletedJobHistoryLimit" /></label>
-            <p class="hint">Total history, including archived jobs. Default: 1,000. Applied at startup, on completion and when saving settings. The oldest completed, failed and cancelled jobs beyond the limit are deleted. Running and queued jobs are kept. One release transfer counts as one job, including all its files. Freed database space is reused; the file may not shrink immediately.</p>
-        </article>
-
-        <article class="card">
-            <div class="card-title-row">
-                <div class="card-title">UPDATES</div>
-                <button type="button" class="secondary slim panel-save-button" @onclick="Save">
-                    <span class="btn-icon">▣</span>
-                    Save
-                </button>
-            </div>
-            <label class="opt"><input type="checkbox" @bind="_form.CheckForUpdates" /> <span><span class="opt-name">Check for updates</span><span class="fh">Shows update status later; no popup and no automatic install.</span></span></label>
-            <table class="info-table tight"><tbody><tr><td>Current version</td><td>v@(Engine.Version)</td></tr></tbody></table>
-        </article>
-
-        <article class="card">
-            <div class="card-title-row">
-                <div class="card-title">NOTIFICATIONS</div>
-                <button type="button" class="secondary slim panel-save-button" @onclick="Save">
-                    <span class="btn-icon">▣</span>
-                    Save
-                </button>
-            </div>
-            <label class="opt"><input type="checkbox" @bind="_form.TrayIconEnabled" /> <span><span class="opt-name">Tray icon</span><span class="fh">Windows notification area icon with dashboard, notification and stop controls.</span></span></label>
-            <label class="opt"><input type="checkbox" @bind="_form.TransferNotificationsEnabled" disabled="@(!_form.TrayIconEnabled)" /> <span><span class="opt-name">Transfer notifications</span><span class="fh">Notify completed and failed transfer jobs.</span></span></label>
-            <label class="opt"><input type="checkbox" @bind="_form.ApiNotificationsEnabled" disabled="@(!_form.TrayIconEnabled)" /> <span><span class="opt-name">API notifications</span><span class="fh">Notify important API-triggered activity.</span></span></label>
-            <div class="settings-status-row"><span>Status</span><strong>@TrayStatus()</strong></div>
-        </article>
-
-        <article class="card">
-            <div class="card-title">DATA FOLDER</div>
-            <p class="path">@Engine.DataDir</p>
-            <p class="fh">State, keys and future history/database files live here next to the executable.</p>
-            <table class="info-table tight">
-                <tbody>
-                    @foreach (var row in DataCounts())
-                    {
-                        <tr><td>@row.Name</td><td>@row.Count file(s)</td></tr>
-                    }
-                </tbody>
-            </table>
-        </article>
-
-        <article class="card data-maintenance-card">
-            <div class="card-title">DATA MAINTENANCE</div>
-            <table class="info-table tight">
-                <tbody>
-                    @foreach (var row in RuntimeCounts())
-                    {
-                        <tr><td>@row.Name</td><td>@row.Count row(s)</td></tr>
-                    }
-                </tbody>
-            </table>
-            <div class="maintenance-actions">
-                <button class="secondary slim" @onclick="ClearLogs">
-                    <span class="btn-icon">≡</span>
-                    Clear logs
-                </button>
-                <button class="secondary slim" @onclick="ClearJobs">
-                    <span class="btn-icon">⇄</span>
-                    Clear jobs
-                </button>
-                <button class="secondary slim" @onclick="ClearReleases">
-                    <span class="btn-icon">✓</span>
-                    Clear release checks
-                </button>
-                <button class="secondary slim" @onclick="ClearDupes">
-                    <span class="btn-icon">⊘</span>
-                    Clear dupes
-                </button>
-                <button class="danger slim" @onclick="ClearRuntimeData">
-                    <span class="btn-icon">×</span>
-                    Clear runtime data
-                </button>
-            </div>
-            <p class="hint">These actions keep sites and settings, but remove stored activity data from the current state file.</p>
-        </article>
-    </section>
 
     <section class="settings-shell">
         <nav class="editor-tabs">
+            <button class='@TabClass("general")' @onclick='() => _tab = "general"'><span class="tab-icon">⚙</span> General</button>
             <button class='@TabClass("web")' @onclick='() => _tab = "web"'><span class="tab-icon">◉</span> Web</button>
             <button class='@TabClass("connection")' @onclick='() => _tab = "connection"'><span class="tab-icon">⌁</span> Connection</button>
             <button class='@TabClass("transfers")' @onclick='() => _tab = "transfers"'><span class="tab-icon">⇄</span> Transfers</button>
@@ -135,9 +31,117 @@
         </nav>
 
         <div class="editor-body">
-            @if (_tab == "web")
+            @if (_tab == "general")
             {
-                <div class="panel-grid">
+                <section class="settings-overview card-grid settings-grid settings-general-grid">
+                    <article class="card settings-web-card">
+                        <div class="card-title">WEB ACCESS</div>
+                        <table class="info-table">
+                            <tbody>
+                                <tr><td>Listening on</td><td>@_form.WebBindAddress:@_form.WebPort</td></tr>
+                                <tr><td>Startup</td><td>@(_form.AutoOpenWebUi ? "Open WebUI" : "Tray only")</td></tr>
+                                <tr><td>Reachable from</td><td><span class="pill @(_form.WebBindAddress is "127.0.0.1" or "localhost" ? "on" : "busy")">@ReachLabel()</span></td></tr>
+                                <tr><td>Version</td><td>v@(Engine.Version)</td></tr>
+                            </tbody>
+                        </table>
+                        <p class="hint">Web bind/port changes are read at startup, so save and restart the exe after changing them.</p>
+                    </article>
+
+                    <article class="card settings-engine-card">
+                        <div class="card-title-row">
+                            <div class="card-title">ENGINE</div>
+                            <button type="button" class="secondary slim panel-save-button" @onclick="Save">
+                                <span class="btn-icon">▣</span>
+                                Save
+                            </button>
+                        </div>
+                        <label class="opt"><input type="checkbox" @bind="_form.DebugLogging" /> <span><span class="opt-name">Debug logging</span><span class="fh">Verbose diagnostics for troubleshooting.</span></span></label>
+                        <label class="opt"><input type="checkbox" @bind="_form.UseActiveModeAddress" /> <span><span class="opt-name">Active address</span><span class="fh">Use the configured active-mode IP when needed.</span></span></label>
+                        <label class="compact-field">Hot JSON jobs<input type="number" min="25" max="150" @bind="_form.StoredJobHistoryLimit" /></label>
+                        <p class="hint">Older completed jobs are moved to the SQLite history archive.</p>
+                        <label class="compact-field">Completed jobs to keep<input type="number" min="1" max="100000" @bind="_form.CompletedJobHistoryLimit" /></label>
+                        <p class="hint">Total history, including archived jobs. Default: 1,000. Applied at startup, on completion and when saving settings. The oldest completed, failed and cancelled jobs beyond the limit are deleted. Running and queued jobs are kept. One release transfer counts as one job, including all its files. Freed database space is reused; the file may not shrink immediately.</p>
+                    </article>
+
+                    <article class="card settings-updates-card">
+                        <div class="card-title-row">
+                            <div class="card-title">UPDATES</div>
+                            <button type="button" class="secondary slim panel-save-button" @onclick="Save">
+                                <span class="btn-icon">▣</span>
+                                Save
+                            </button>
+                        </div>
+                        <label class="opt"><input type="checkbox" @bind="_form.CheckForUpdates" /> <span><span class="opt-name">Check for updates</span><span class="fh">Shows update status later; no popup and no automatic install.</span></span></label>
+                        <table class="info-table tight"><tbody><tr><td>Current version</td><td>v@(Engine.Version)</td></tr></tbody></table>
+                    </article>
+
+                    <article class="card settings-notifications-card">
+                        <div class="card-title-row">
+                            <div class="card-title">NOTIFICATIONS</div>
+                            <button type="button" class="secondary slim panel-save-button" @onclick="Save">
+                                <span class="btn-icon">▣</span>
+                                Save
+                            </button>
+                        </div>
+                        <label class="opt"><input type="checkbox" @bind="_form.TrayIconEnabled" /> <span><span class="opt-name">Tray icon</span><span class="fh">Windows notification area icon with dashboard, notification and stop controls.</span></span></label>
+                        <label class="opt"><input type="checkbox" @bind="_form.TransferNotificationsEnabled" disabled="@(!_form.TrayIconEnabled)" /> <span><span class="opt-name">Transfer notifications</span><span class="fh">Notify completed and failed transfer jobs.</span></span></label>
+                        <label class="opt"><input type="checkbox" @bind="_form.ApiNotificationsEnabled" disabled="@(!_form.TrayIconEnabled)" /> <span><span class="opt-name">API notifications</span><span class="fh">Notify important API-triggered activity.</span></span></label>
+                        <div class="settings-status-row"><span>Status</span><strong>@TrayStatus()</strong></div>
+                    </article>
+
+                    <article class="card settings-data-card">
+                        <div class="card-title">DATA FOLDER</div>
+                        <p class="path">@Engine.DataDir</p>
+                        <p class="fh">State, keys and future history/database files live here next to the executable.</p>
+                        <table class="info-table tight">
+                            <tbody>
+                                @foreach (var row in DataCounts())
+                                {
+                                    <tr><td>@row.Name</td><td>@row.Count file(s)</td></tr>
+                                }
+                            </tbody>
+                        </table>
+                    </article>
+
+                    <article class="card data-maintenance-card settings-maintenance-card">
+                        <div class="card-title">DATA MAINTENANCE</div>
+                        <table class="info-table tight">
+                            <tbody>
+                                @foreach (var row in RuntimeCounts())
+                                {
+                                    <tr><td>@row.Name</td><td>@row.Count row(s)</td></tr>
+                                }
+                            </tbody>
+                        </table>
+                        <div class="maintenance-actions">
+                            <button class="secondary slim" @onclick="ClearLogs">
+                                <span class="btn-icon">≡</span>
+                                Clear logs
+                            </button>
+                            <button class="secondary slim" @onclick="ClearJobs">
+                                <span class="btn-icon">⇄</span>
+                                Clear jobs
+                            </button>
+                            <button class="secondary slim" @onclick="ClearReleases">
+                                <span class="btn-icon">✓</span>
+                                Clear release checks
+                            </button>
+                            <button class="secondary slim" @onclick="ClearDupes">
+                                <span class="btn-icon">⊘</span>
+                                Clear dupes
+                            </button>
+                            <button class="danger slim" @onclick="ClearRuntimeData">
+                                <span class="btn-icon">×</span>
+                                Clear runtime data
+                            </button>
+                        </div>
+                        <p class="hint">These actions keep sites and settings, but remove stored activity data from the current state file.</p>
+                    </article>
+                </section>
+            }
+            else if (_tab == "web")
+            {
+                <div class="panel-grid settings-grid settings-pair-grid">
                     <section class="panel-card">
                         <PanelHeader Title="WebUI Access" SaveLabel="Save settings" OnSave="Save" />
                         <div class="callout">Change the WebUI port and bind address here. Save and restart WeaveFXP for these startup settings to apply.</div>
@@ -146,6 +150,7 @@
                             <label>Port<input type="number" @bind="_form.WebPort" /></label>
                         </div>
                         <label class="opt"><input type="checkbox" @bind="_form.AutoOpenWebUi" /> <span><span class="opt-name">Open WebUI on startup</span><span class="fh">Launch the dashboard in your browser when the exe starts.</span></span></label>
+                        <label class="opt"><input type="checkbox" @bind="_form.ShowConsoleOnStartup" /> <span><span class="opt-name">Show console on startup</span><span class="fh">Windows only. Hidden by default. Applies at the next app start; the tray menu can show or hide it manually.</span></span></label>
                     </section>
 
                     <section class="panel-card">
@@ -161,8 +166,8 @@
             }
             else if (_tab == "connection")
             {
-                <div class="panel-grid">
-                    <section class="panel-card">
+                <div class="panel-grid settings-grid settings-connection-grid">
+                    <section class="panel-card settings-network-card">
                         <PanelHeader Title="Network" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label class="wide">Bind interface
@@ -184,8 +189,7 @@
                             </label>
                         </div>
                     </section>
-
-                    <section class="panel-card">
+                    <section class="panel-card settings-active-card">
                         <PanelHeader Title="Active Mode" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>Port start<input type="number" @bind="_form.ActiveModePortRange.Start" /></label>
@@ -197,24 +201,43 @@
                             </div>
                         </div>
                     </section>
-
-                    <section class="panel-card proxy-card">
-                        <PanelHeader Title="Proxy" SaveLabel="Save settings" OnSave="Save" />
-                        <div class="form-grid">
-                            <label class="wide">Control proxy<input @bind="_form.Proxy" placeholder="socks5://host:port or http://host:port" /></label>
-                            <label>Control user<input @bind="_form.ProxyUsername" /></label>
-                            <label>Control password<input type="password" @bind="_proxyPassword" placeholder="unchanged if empty" /></label>
-                            <label class="wide">Data proxy<input @bind="_form.DataProxy" placeholder="empty inherits control; direct bypasses it" /></label>
-                            <label>Data user<input @bind="_form.DataProxyUsername" /></label>
-                            <label>Data password<input type="password" @bind="_dataProxyPassword" placeholder="unchanged if empty" /></label>
-                        </div>
+                    <section class="panel-card settings-proxy-card">
+                    <PanelHeader Title="Proxy" SaveLabel="Save settings" OnSave="Save" />
+                    <div class="form-grid">
+                        <label class="wide">Control proxy<input @bind="_form.Proxy" placeholder="socks5://host:port or http://host:port" /></label>
+                        <label>Control user<input @bind="_form.ProxyUsername" /></label>
+                        <label>Control password<input type="password" @bind="_proxyPassword" placeholder="unchanged if empty" /></label>
+                        <label class="wide">Data proxy<input @bind="_form.DataProxy" placeholder="empty inherits control; direct bypasses it" /></label>
+                        <label>Data user<input @bind="_form.DataProxyUsername" /></label>
+                        <label>Data password<input type="password" @bind="_dataProxyPassword" placeholder="unchanged if empty" /></label>
+                    </div>
                     </section>
                 </div>
             }
             else if (_tab == "transfers")
             {
-                <div class="panel-grid">
-                    <section class="panel-card">
+                <div class="panel-grid settings-grid settings-transfers-grid">
+                    <section class="panel-card settings-racing-card">
+                    <PanelHeader Title="Racing" SaveLabel="Save settings" OnSave="Save" />
+                    <div class="form-grid">
+                        <label>Poll interval (ms)<input type="number" min="25" max="30000" @bind="_form.RacePollIntervalMs" /></label>
+                        <label>Stop after idle cycles<input type="number" min="1" @bind="_form.RaceMaxIdleCycles" /></label>
+                    </div>
+                    <p class="fh">A race re-lists the source every poll interval and moves new files as they land. Each pass stops when the release is complete, or after this many polls with no new files.</p>
+                    <div class="form-grid">
+                        <label>Retry incomplete race (extra attempts)<input type="number" min="0" max="20" @bind="_form.IncompleteRaceRetries" /></label>
+                        <label>Wait between retries (seconds)<input type="number" min="1" max="3600" @bind="_form.IncompleteRaceRetryDelaySeconds" /></label>
+                        <label>Completion recheck window (seconds)<input type="number" min="0" max="3600" @bind="_form.RaceCompletionRecheckSeconds" /></label>
+                    </div>
+                    <p class="fh">Default: 3 extra attempts, 30 seconds apart. 0 disables automatic retries. Applies to directional and mesh races that stop incomplete after going idle. Each retry rechecks existing files and refreshes exhausted file attempts within the same job. Stop/cancel and the job watchdog still apply.</p>
+                    <div class="checks">
+                        <label><input type="checkbox" @bind="_form.FtpDebugLog" /> Debug: also log FTP protocol for API-triggered races</label>
+                    </div>
+                    <p class="fh">Manual browsing, transfers and downloads always write to the FTP Log. Races started over the API run silent so logging does not cost throughput; tick this only when debugging one.</p>
+                    <label class="opt"><input type="checkbox" @bind="_form.RaceDestinationPrecheck" /> <span><span class="opt-name">Destination precheck</span><span class="fh">Use target listings to skip existing files before transfer. Completed transfers are always checked again so missing files can be retried.</span></span></label>
+                    <label class="opt"><input type="checkbox" @bind="_form.PrecreateRaceDirs" /> <span><span class="opt-name">Create release dir at race start</span><span class="fh">Make the release folder on every target as soon as a race is announced, before the first file (RaceTrade style). If the release never spreads the empty dir may get nuked. Sites can opt out in Site Manager.</span></span></label>
+                    </section>
+                    <section class="panel-card settings-jobs-card">
                         <PanelHeader Title="FXP / Race Jobs" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>Max FXP jobs<input type="number" @bind="_form.MaxConcurrentFxpJobs" /></label>
@@ -222,22 +245,7 @@
                         </div>
                         <p class="fh">These limits control how many FXP and race jobs may run at the same time.</p>
                     </section>
-
-                    <section class="panel-card">
-                        <PanelHeader Title="Racing" SaveLabel="Save settings" OnSave="Save" />
-                        <div class="form-grid">
-                            <label>Poll interval (ms)<input type="number" min="25" max="30000" @bind="_form.RacePollIntervalMs" /></label>
-                            <label>Stop after idle cycles<input type="number" min="1" @bind="_form.RaceMaxIdleCycles" /></label>
-                        </div>
-                        <p class="fh">A race re-lists the source every poll interval and moves new files as they land. It stops when the release is complete, or after this many polls with no new files.</p>
-                        <div class="checks">
-                            <label><input type="checkbox" @bind="_form.FtpDebugLog" /> Debug: also log FTP protocol for API-triggered races</label>
-                        </div>
-                        <p class="fh">Manual browsing, transfers and downloads always write to the FTP Log. Races started over the API run silent so logging does not cost throughput; tick this only when debugging one.</p>
-                        <label class="opt"><input type="checkbox" @bind="_form.RaceDestinationPrecheck" /> <span><span class="opt-name">Destination precheck</span><span class="fh">Use target listings to skip existing files before transfer. Completed transfers are always checked again so missing files can be retried.</span></span></label>
-                    </section>
-
-                    <section class="panel-card">
+                    <section class="panel-card settings-tcp-card">
                         <PanelHeader Title="TCP tuning" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>Send buffer (KB)<input type="number" min="0" max="16384" @bind="_form.TcpSendBufferKBytes" /></label>
@@ -245,148 +253,134 @@
                         </div>
                         <p class="fh">0 lets the OS decide. Larger buffers can help fast LAN/download/upload paths.</p>
                     </section>
-
-                    <section class="panel-card">
-                        <PanelHeader Title="Local" SaveLabel="Save settings" OnSave="Save" />
-                        <div class="form-grid">
-                            <label class="wide">Download folder
-                                <span class="input-action">
-                                    <input @bind="_form.DownloadDir" placeholder="downloads" />
-                                    <button type="button" class="secondary slim" @onclick="OpenFolderPicker">Browse</button>
-                                </span>
-                            </label>
-                            <label>Download slots
-                                <select @bind="_form.LocalDownloadSlots">
-                                    <option value="0">ALL</option>
-                                    @foreach (var slot in Enumerable.Range(1, 64))
-                                    {
-                                        <option value="@slot">@slot</option>
-                                    }
-                                </select>
-                            </label>
-                            <label>Upload slots
-                                <select @bind="_form.LocalUploadSlots">
-                                    <option value="0">ALL</option>
-                                    @foreach (var slot in Enumerable.Range(1, 64))
-                                    {
-                                        <option value="@slot">@slot</option>
-                                    }
-                                </select>
-                            </label>
-                        </div>
-                        <p class="fh">ALL inherits the effective Site Manager slots for the connected server, including the login-slot cap.</p>
-                        <label class="opt"><input type="checkbox" @bind="_form.SkipExactSizeLocalFiles" /> <span><span class="opt-name">Skip existing files with the same size</span><span class="fh">Applies to local downloads and uploads. Matching files count as complete without transferring them again.</span></span></label>
-                        <label class="opt"><input type="checkbox" @bind="_form.ResumePartialDownloads" /> <span><span class="opt-name">Resume partial downloads</span><span class="fh">Continue smaller local files with FTP REST when supported; otherwise restart that file safely.</span></span></label>
-                        <label class="opt"><input type="checkbox" @bind="_form.VerifyLocalDownloadsWithSfv" /> <span><span class="opt-name">Verify downloaded releases with SFV</span><span class="fh">Shows a live zipscript-style folder banner during local downloads, then checks CRC32 and creates COMPLETE or per-file .missing markers.</span></span></label>
-                    </section>
-
-                    <section class="panel-card">
+                    <section class="panel-card settings-behavior-card">
                         <PanelHeader Title="Behavior" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
                             <label>Job timeout (minutes)<input type="number" min="5" max="10080" @bind="_form.JobWatchdogTimeoutMinutes" /></label>
                         </div>
                         <label class="opt"><input type="checkbox" @bind="_form.SkipEmptyFolders" /> <span><span class="opt-name">Skip empty folders</span><span class="fh">Do not create destination folders when nothing transferable is inside.</span></span></label>
                     </section>
-
-                    <section class="panel-card full">
-                        <PanelHeader Title="Global Skiplist" SaveLabel="Save settings" OnSave="Save">
-                            <button class="secondary slim" @onclick="AddGlobalSkipPattern">
-                                <span class="btn-icon">＋</span>
-                                Add pattern
-                            </button>
-                        </PanelHeader>
-                        <p class="hint">Applied before every site skiplist. Plain text matches names/paths; * and ? work as wildcards.</p>
-                        <div class="list-grid list-head">
-                            <span>Pattern</span>
-                            <span></span>
-                        </div>
-                        @if (_form.GlobalSkiplist.Count == 0)
-                        {
-                            <div class="empty-row compact">No global skip patterns configured</div>
-                        }
-                        @for (var i = 0; i < _form.GlobalSkiplist.Count; i++)
-                        {
-                            var index = i;
-                            <div class="list-grid">
-                                <input placeholder="Sample or *proof*" @bind="_form.GlobalSkiplist[index]" />
-                                <button class="secondary icon-btn danger" title="Remove pattern" @onclick="() => RemoveGlobalSkipPattern(index)">×</button>
-                            </div>
-                        }
+                    <section class="panel-card settings-skiplist-card">
+                    <PanelHeader Title="Global Skiplist" SaveLabel="Save settings" OnSave="Save">
+                        <button class="secondary slim" @onclick="AddGlobalSkipPattern">
+                            <span class="btn-icon">＋</span>
+                            Add pattern
+                        </button>
+                    </PanelHeader>
+                    <p class="hint">Rules run from top to bottom. The first match wins, case-insensitive. Global rules run before site rules.</p>
+                    <details class="settings-help">
+                        <summary>Pattern syntax and rule actions</summary>
+                        <p class="hint">Plain text matches anywhere in a name. Use <code>*</code> and <code>?</code> as wildcards, or enable Regex
+                            for expressions such as <code>(?i).*\.nfo$</code>. File / Dir select which entries a rule applies to.
+                            <b>Deny</b> skips a match, <b>Allow</b> keeps it, and <b>Unique</b> allows only the first match per directory.</p>
+                    </details>
+                    <SkiplistEditor Entries="_form.GlobalSkiplist" ShowTester="true" Placeholder="Sample or *proof*" />
                     </section>
-
-                    <section class="panel-card full">
-                        <PanelHeader Title="Global Order List" SaveLabel="Save settings" OnSave="Save">
-                            <button class="secondary slim" @onclick="AddGlobalOrderPattern">
-                                <span class="btn-icon">＋</span>
-                                Add pattern
-                            </button>
-                        </PanelHeader>
-                        <p class="hint">Matched rows transfer first, in this order. Plain text and * / ? wildcards are supported.</p>
-                        <div class="order-grid list-head">
-                            <span>Pattern</span>
-                            <span>Order</span>
-                            <span></span>
-                        </div>
-                        @if (_form.GlobalOrderList.Count == 0)
-                        {
-                            <div class="empty-row compact">No global transfer order configured</div>
-                        }
-                        @for (var i = 0; i < _form.GlobalOrderList.Count; i++)
-                        {
-                            var index = i;
-                            <div class="order-grid">
-                                <input placeholder="*.sfv or *.nfo" @bind="_form.GlobalOrderList[index]" />
-                                <span class="order-buttons">
-                                    <button class="secondary icon-btn" title="Move up" disabled="@(index == 0)" @onclick="() => MoveGlobalOrder(index, -1)">↑</button>
-                                    <button class="secondary icon-btn" title="Move down" disabled="@(index >= _form.GlobalOrderList.Count - 1)" @onclick="() => MoveGlobalOrder(index, 1)">↓</button>
-                                </span>
-                                <button class="secondary icon-btn danger" title="Remove pattern" @onclick="() => RemoveGlobalOrderPattern(index)">×</button>
-                            </div>
-                        }
+                    <section class="panel-card settings-local-card">
+                    <PanelHeader Title="Local" SaveLabel="Save settings" OnSave="Save" />
+                    <div class="form-grid">
+                        <label class="wide">Download folder
+                            <span class="input-action">
+                                <input @bind="_form.DownloadDir" placeholder="downloads" />
+                                <button type="button" class="secondary slim" @onclick="OpenFolderPicker">Browse</button>
+                            </span>
+                        </label>
+                        <label>Download slots
+                            <select @bind="_form.LocalDownloadSlots">
+                                <option value="0">ALL</option>
+                                @foreach (var slot in Enumerable.Range(1, 64))
+                                {
+                                    <option value="@slot">@slot</option>
+                                }
+                            </select>
+                        </label>
+                        <label>Upload slots
+                            <select @bind="_form.LocalUploadSlots">
+                                <option value="0">ALL</option>
+                                @foreach (var slot in Enumerable.Range(1, 64))
+                                {
+                                    <option value="@slot">@slot</option>
+                                }
+                            </select>
+                        </label>
+                    </div>
+                    <p class="fh">ALL inherits the effective Site Manager slots for the connected server, including the login-slot cap.</p>
+                    <label class="opt"><input type="checkbox" @bind="_form.SkipExactSizeLocalFiles" /> <span><span class="opt-name">Skip existing files with the same size</span><span class="fh">Applies to local downloads and uploads. Matching files count as complete without transferring them again.</span></span></label>
+                    <label class="opt"><input type="checkbox" @bind="_form.ResumePartialDownloads" /> <span><span class="opt-name">Resume partial downloads</span><span class="fh">Continue smaller local files with FTP REST when supported; otherwise restart that file safely.</span></span></label>
+                    <label class="opt"><input type="checkbox" @bind="_form.VerifyLocalDownloadsWithSfv" /> <span><span class="opt-name">Verify downloaded releases with SFV</span><span class="fh">Shows a live zipscript-style folder banner during local downloads, then checks CRC32 and creates COMPLETE or per-file .missing markers.</span></span></label>
                     </section>
-
-                    <section class="panel-card full">
-                        <PanelHeader Title="Site Order" SaveLabel="Save settings" OnSave="Save">
-                                <select @bind="_siteOrderCandidate">
-                                    <option value="">Select site</option>
-                                    @foreach (var site in AvailableOrderSites())
-                                    {
-                                        <option value="@site.Name">@site.Name</option>
-                                    }
-                                </select>
-                                <button class="secondary slim" disabled="@(!AvailableOrderSites().Any())" @onclick="AddSiteOrder">
-                                    <span class="btn-icon">＋</span>
-                                    Add site
-                                </button>
-                        </PanelHeader>
-                        <p class="hint">Controls the default order for site dropdowns and site lists. Sites not listed here are shown after these.</p>
-                        <div class="order-grid list-head">
-                            <span>Site</span>
-                            <span>Order</span>
-                            <span></span>
+                    <section class="panel-card settings-order-card">
+                    <PanelHeader Title="Global Order List" SaveLabel="Save settings" OnSave="Save">
+                        <button class="secondary slim" @onclick="AddGlobalOrderPattern">
+                            <span class="btn-icon">＋</span>
+                            Add pattern
+                        </button>
+                    </PanelHeader>
+                    <p class="hint">Matched rows transfer first, in this order. Plain text and * / ? wildcards are supported.</p>
+                    <div class="order-grid list-head">
+                        <span>Pattern</span>
+                        <span>Order</span>
+                        <span></span>
+                    </div>
+                    @if (_form.GlobalOrderList.Count == 0)
+                    {
+                        <div class="empty-row compact">No global transfer order configured</div>
+                    }
+                    @for (var i = 0; i < _form.GlobalOrderList.Count; i++)
+                    {
+                        var index = i;
+                        <div class="order-grid">
+                            <input placeholder="*.sfv or *.nfo" @bind="_form.GlobalOrderList[index]" />
+                            <span class="order-buttons">
+                                <button class="secondary icon-btn" title="Move up" disabled="@(index == 0)" @onclick="() => MoveGlobalOrder(index, -1)">↑</button>
+                                <button class="secondary icon-btn" title="Move down" disabled="@(index >= _form.GlobalOrderList.Count - 1)" @onclick="() => MoveGlobalOrder(index, 1)">↓</button>
+                            </span>
+                            <button class="secondary icon-btn danger" title="Remove pattern" @onclick="() => RemoveGlobalOrderPattern(index)">×</button>
                         </div>
-                        @if (_form.SiteOrder.Count == 0)
-                        {
-                            <div class="empty-row compact">No preferred order configured</div>
-                        }
-                        @for (var i = 0; i < _form.SiteOrder.Count; i++)
-                        {
-                            var index = i;
-                            <div class="order-grid">
-                                <span class="order-name">@_form.SiteOrder[index]</span>
-                                <span class="order-buttons">
-                                    <button class="secondary icon-btn" title="Move up" disabled="@(index == 0)" @onclick="() => MoveSiteOrder(index, -1)">↑</button>
-                                    <button class="secondary icon-btn" title="Move down" disabled="@(index >= _form.SiteOrder.Count - 1)" @onclick="() => MoveSiteOrder(index, 1)">↓</button>
-                                </span>
-                                <button class="secondary icon-btn danger" title="Remove site" @onclick="() => RemoveSiteOrder(index)">×</button>
-                            </div>
-                        }
+                    }
+                    </section>
+                    <section class="panel-card settings-sites-card">
+                    <PanelHeader Title="Site Order" SaveLabel="Save settings" OnSave="Save">
+                            <select @bind="_siteOrderCandidate">
+                                <option value="">Select site</option>
+                                @foreach (var site in AvailableOrderSites())
+                                {
+                                    <option value="@site.Name">@site.Name</option>
+                                }
+                            </select>
+                            <button class="secondary slim" disabled="@(!AvailableOrderSites().Any())" @onclick="AddSiteOrder">
+                                <span class="btn-icon">＋</span>
+                                Add site
+                            </button>
+                    </PanelHeader>
+                    <p class="hint">Controls the default order for site dropdowns and site lists. Sites not listed here are shown after these.</p>
+                    <div class="order-grid list-head">
+                        <span>Site</span>
+                        <span>Order</span>
+                        <span></span>
+                    </div>
+                    @if (_form.SiteOrder.Count == 0)
+                    {
+                        <div class="empty-row compact">No preferred order configured</div>
+                    }
+                    @for (var i = 0; i < _form.SiteOrder.Count; i++)
+                    {
+                        var index = i;
+                        <div class="order-grid">
+                            <span class="order-name">@_form.SiteOrder[index]</span>
+                            <span class="order-buttons">
+                                <button class="secondary icon-btn" title="Move up" disabled="@(index == 0)" @onclick="() => MoveSiteOrder(index, -1)">↑</button>
+                                <button class="secondary icon-btn" title="Move down" disabled="@(index >= _form.SiteOrder.Count - 1)" @onclick="() => MoveSiteOrder(index, 1)">↓</button>
+                            </span>
+                            <button class="secondary icon-btn danger" title="Remove site" @onclick="() => RemoveSiteOrder(index)">×</button>
+                        </div>
+                    }
                     </section>
                 </div>
             }
             else
             {
-                <div class="panel-grid">
+                <div class="panel-grid settings-grid settings-pair-grid">
                     <section class="panel-card">
                         <PanelHeader Title="HTTP / JSON" SaveLabel="Save settings" OnSave="Save" />
                         <div class="form-grid">
@@ -483,7 +477,7 @@
     private AppSettings _form = new();
     private List<NetworkInterfaceInfo> _interfaces = new();
     private List<Site> _sites = new();
-    private string _tab = "web";
+    private string _tab = "general";
     private string _apiPassword = "";
     private string _proxyPassword = "";
     private string _dataProxyPassword = "";
@@ -586,7 +580,7 @@
         catch { return Enumerable.Empty<string>(); }
     }
 
-    private void AddGlobalSkipPattern() => _form.GlobalSkiplist.Add("");
+    private void AddGlobalSkipPattern() => _form.GlobalSkiplist.Add(new SkiplistEntry());
 
     private void RemoveGlobalSkipPattern(int index)
     {
@@ -659,7 +653,7 @@
     private IEnumerable<(string Name, int Count)> RuntimeCounts()
     {
         yield return ("logs", Engine.RecentLogs(3000).Count);
-        yield return ("jobs", Engine.Jobs().Count);
+        yield return ("jobs", Engine.JobsForUi().Count);
         yield return ("archived jobs", Engine.ArchivedJobCount());
         yield return ("release checks", Engine.Releases().Count);
         yield return ("dupes", Engine.DupeCount());

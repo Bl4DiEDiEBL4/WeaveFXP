@@ -36,7 +36,6 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
     private uint _taskbarCreatedMessage;
     private bool _iconOwned;
     private bool _trayAdded;
-    private bool _startupConsoleHandled;
     private bool _disposed;
     private string _status = "Not started";
 
@@ -52,7 +51,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
     {
         DisableConsoleCloseButton();
         _engine.Changed += OnEngineChanged;
-        foreach (var job in _engine.Jobs().Where(j => j.Terminal))
+        foreach (var job in _engine.JobsForUi().Where(j => j.Terminal))
             _notifiedJobs.Add(job.Id);
         _workerCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _worker = Task.Run(() => ProcessNotifications(_workerCts.Token), CancellationToken.None);
@@ -100,7 +99,6 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
 
         EnsureTrayStarted();
         RefreshTrayIcon();
-        HideStartupConsoleOnceTrayIsReady();
     }
 
     private void NotifyFinishedJobs()
@@ -108,7 +106,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
         var settings = _engine.Settings(false);
         if (!settings.TrayIconEnabled || !settings.TransferNotificationsEnabled) return;
 
-        foreach (var job in _engine.Jobs().Where(j => j.Terminal).OrderBy(j => j.FinishedAt))
+        foreach (var job in _engine.JobsForUi().Where(j => j.Terminal).OrderBy(j => j.FinishedAt))
         {
             lock (_gate)
             {
@@ -467,15 +465,12 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
         OpenBrowser($"http://{host}:{settings.WebPort}/");
     }
 
-    private void HideStartupConsoleOnceTrayIsReady()
+    public static void ConfigureStartupConsole(bool show)
     {
-        if (_startupConsoleHandled || !IsPackagedExecutable()) return;
-        lock (_gate)
-        {
-            if (_startupConsoleHandled || !_trayAdded) return;
-            _startupConsoleHandled = true;
-        }
-        SetConsoleVisible(false);
+        // Only the packaged Windows executable owns this window. Do not hide a
+        // developer's terminal when running the DLL through dotnet.
+        if (!OperatingSystem.IsWindows() || !IsPackagedExecutable()) return;
+        SetConsoleVisible(show);
     }
 
     private static bool IsPackagedExecutable() =>
@@ -491,7 +486,15 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
 
     private static void SetConsoleVisible(bool visible)
     {
+        if (!OperatingSystem.IsWindows()) return;
         var window = NativeMethods.GetConsoleWindow();
+        if (visible && window == IntPtr.Zero)
+        {
+            if (!NativeMethods.AllocConsole()) return;
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+            Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
+            window = NativeMethods.GetConsoleWindow();
+        }
         if (window == IntPtr.Zero) return;
         DisableConsoleCloseButton(window);
         NativeMethods.ShowWindow(window, visible ? 9 : 0);
@@ -526,7 +529,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
     private string BuildTooltip()
     {
         var settings = _engine.Settings(false);
-        var jobs = _engine.Jobs();
+        var jobs = _engine.JobsForUi();
         var running = jobs.Count(j => j.State == JobState.Running);
         var queued = jobs.Count(j => j.State == JobState.Queued);
         return $"WeaveFXP v{_engine.Version}\nEngine: Running\nQueue: {running} running, {queued} queued\nTransfer notifications: {(settings.TransferNotificationsEnabled ? "On" : "Off")}";
@@ -697,6 +700,7 @@ public sealed class TrayNotificationService : IHostedService, IDisposable
         [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool DestroyIcon(IntPtr hIcon);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr GetModuleHandle(string? moduleName);
         [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+        [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool AllocConsole();
 
         public const uint ScClose = 0xF060;
         public const uint MfByCommand = 0x00000000;

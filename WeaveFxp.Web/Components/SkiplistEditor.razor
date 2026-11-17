@@ -1,0 +1,169 @@
+@* cbftp-style skiplist editor: Regex | Pattern | File | Dir | Action, checked top to
+   bottom, first match wins. Shared by the global skiplist (Settings) and each site's
+   skiplist (Site Manager). Styles are scoped to .wfx-skip so app.css is untouched. *@
+
+<div class="wfx-skip">
+    <div class="wfx-skip-row wfx-skip-head">
+        <span title="Rule number">#</span>
+        <span title="Pattern is a regular expression">Regex</span>
+        <span>Pattern</span>
+        <span title="Rule applies to files">File</span>
+        <span title="Rule applies to directories">Dir</span>
+        <span>Action</span>
+        <span></span>
+    </div>
+
+    @if (Entries.Count == 0)
+    {
+        <div class="empty-row compact">No skip patterns configured</div>
+    }
+
+    @for (var i = 0; i < Entries.Count; i++)
+    {
+        var index = i;
+        var entry = Entries[index];
+        var error = SkiplistRules.ValidationError(entry);
+        <div class="wfx-skip-row" @key="entry">
+            <span class="wfx-skip-number" aria-label="@($"Rule {index + 1}")">@(index + 1)</span>
+            <label class="wfx-skip-toggle"><input type="checkbox" class="wfx-skip-chk" title="Regex" @bind="entry.Regex" /><span>Regex</span></label>
+            <input class="wfx-skip-pattern @(error is null ? "" : "wfx-skip-bad")" title="@(error ?? "")"
+                   aria-label="Pattern"
+                   placeholder="@(entry.Regex ? RegexHint : Placeholder)"
+                   @bind="entry.Pattern" @bind:event="oninput" />
+            <label class="wfx-skip-toggle"><input type="checkbox" class="wfx-skip-chk" title="Applies to files" @bind="entry.File" /><span>File</span></label>
+            <label class="wfx-skip-toggle"><input type="checkbox" class="wfx-skip-chk" title="Applies to directories" @bind="entry.Dir" /><span>Dir</span></label>
+            <select class="wfx-skip-action @ActionClass(entry.Action)" aria-label="Rule action" @bind="entry.Action">
+                <option value="@SkiplistAction.Deny">Deny</option>
+                <option value="@SkiplistAction.Allow">Allow</option>
+                <option value="@SkiplistAction.Unique">Unique</option>
+            </select>
+            <span class="wfx-skip-btns">
+                <button type="button" class="secondary icon-btn" title="Move up" disabled="@(index == 0)" @onclick="() => Move(index, -1)">↑</button>
+                <button type="button" class="secondary icon-btn" title="Move down" disabled="@(index == Entries.Count - 1)" @onclick="() => Move(index, 1)">↓</button>
+                <button type="button" class="secondary icon-btn danger" title="Remove rule" @onclick="() => Remove(index)">×</button>
+            </span>
+        </div>
+        @if (error is not null)
+        {
+            <div class="wfx-skip-err">@error</div>
+        }
+    }
+
+    @if (ShowTester)
+    {
+        <div class="wfx-skip-test">
+            <span class="wfx-skip-test-label">Test</span>
+            <input class="wfx-skip-pattern" placeholder="path or name, e.g. Sample/clip.mkv" aria-label="Name or path to test"
+                   @bind="_testName" @bind:event="oninput" />
+            <select aria-label="Entry type" @bind="_testKind">
+                <option value="file">File</option>
+                <option value="dir">Dir</option>
+            </select>
+            <span class="wfx-skip-verdict @TestClass" role="status">@TestText</span>
+        </div>
+    }
+</div>
+
+<style>
+    .wfx-skip { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; max-width: 100%; container-type: inline-size; }
+    .wfx-skip-row {
+        display: grid;
+        grid-template-columns: 28px 40px minmax(120px, 1fr) 32px 32px 92px 110px;
+        min-width: 630px;
+        gap: 8px;
+        align-items: center;
+    }
+    .wfx-skip-head { font-size: 0.78em; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em; }
+    .wfx-skip-head span:nth-child(1), .wfx-skip-head span:nth-child(2), .wfx-skip-head span:nth-child(4), .wfx-skip-head span:nth-child(5) { text-align: center; }
+    .wfx-skip-number { justify-self: center; color: var(--muted); font: 11px ui-monospace, Consolas, monospace; }
+    .wfx-skip-chk { justify-self: center; width: 16px; height: 16px; min-height: 16px; margin: 0; padding: 0; flex: 0 0 16px; }
+    .wfx-skip-toggle { display: flex; align-items: center; justify-content: center; gap: 6px; }
+    .wfx-skip-toggle span { display: none; }
+    .wfx-skip-pattern { font-family: ui-monospace, Consolas, monospace; min-width: 0; }
+    .wfx-skip-bad { border-color: rgba(255, 91, 120, 0.7) !important; }
+    .wfx-skip-err { color: #ff8da1; font-size: 0.8em; margin: -2px 0 2px 84px; }
+    .wfx-skip-btns { display: inline-flex; gap: 4px; }
+    .wfx-skip-action.deny { color: #ff8da1; }
+    .wfx-skip-action.allow { color: #6ff0b0; }
+    .wfx-skip-action.unique { color: #ffd479; }
+    .wfx-skip-test {
+        display: grid;
+        min-width: 630px;
+        grid-template-columns: 76px minmax(0, 1fr) 90px minmax(0, 1.2fr);
+        gap: 8px;
+        align-items: center;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px dashed rgba(120, 140, 170, 0.3);
+    }
+    .wfx-skip-test-label { font-size: 0.78em; opacity: 0.7; text-transform: uppercase; text-align: center; }
+    .wfx-skip-verdict { font-size: 0.86em; }
+    .wfx-skip-test select { width: 100%; min-width: 0; }
+    .wfx-skip-verdict.deny { color: #ff8da1; }
+    .wfx-skip-verdict.allow { color: #6ff0b0; }
+    .wfx-skip-verdict.unique { color: #ffd479; }
+    .wfx-skip-verdict.none { opacity: 0.75; }
+    @@container (max-width: 630px) {
+        .wfx-skip-row { grid-template-columns: repeat(3, minmax(0, 1fr)); min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 5px; }
+        .wfx-skip-head { display: none; }
+        .wfx-skip-number { grid-column: 1 / -1; order: -2; justify-self: start; }
+        .wfx-skip-row > .wfx-skip-pattern { grid-column: 1 / -1; order: -1; width: 100%; }
+        .wfx-skip-toggle span { display: inline; font-size: 11px; }
+        .wfx-skip-action, .wfx-skip-btns { grid-column: 1 / -1; width: 100%; }
+        .wfx-skip-btns { justify-content: flex-end; }
+        .wfx-skip-test { min-width: 0; grid-template-columns: minmax(0, 1fr) 80px; }
+        .wfx-skip-test-label, .wfx-skip-verdict { grid-column: 1 / -1; text-align: left; }
+        .wfx-skip-err { margin-left: 0; overflow-wrap: anywhere; }
+    }
+</style>
+
+@code {
+    [Parameter, EditorRequired] public List<SkiplistEntry> Entries { get; set; } = new();
+    [Parameter] public bool ShowTester { get; set; }
+    [Parameter] public string Placeholder { get; set; } = "*incomplete* or Sample";
+    private const string RegexHint = "(?i).*\\.nfo$";
+
+    private string _testName = "";
+    private string _testKind = "file";
+
+    private void Move(int index, int delta)
+    {
+        var target = index + delta;
+        if (index < 0 || index >= Entries.Count || target < 0 || target >= Entries.Count) return;
+        (Entries[index], Entries[target]) = (Entries[target], Entries[index]);
+    }
+
+    private void Remove(int index)
+    {
+        if (index >= 0 && index < Entries.Count) Entries.RemoveAt(index);
+    }
+
+    private static string ActionClass(SkiplistAction action) => action.ToString().ToLowerInvariant();
+
+    private SkiplistResult TestResult => SkiplistRules.Evaluate(Entries, _testName, _testKind == "dir");
+
+    private string TestClass => string.IsNullOrWhiteSpace(_testName) ? "none" : TestResult.Verdict switch
+    {
+        SkiplistVerdict.Deny => "deny",
+        SkiplistVerdict.Allow => "allow",
+        SkiplistVerdict.Unique => "unique",
+        _ => "none",
+    };
+
+    private string TestText
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(_testName)) return "Type a name to see which rule hits";
+            var result = TestResult;
+            var rule = result.Entry is null ? "" : $"rule #{result.Index + 1} ({result.Entry.Pattern})";
+            return result.Verdict switch
+            {
+                SkiplistVerdict.Deny => $"Skipped by {rule}",
+                SkiplistVerdict.Allow => $"Allowed by {rule}",
+                SkiplistVerdict.Unique => $"Unique by {rule}: only the first match per dir is raced",
+                _ => "No rule matches: allowed",
+            };
+        }
+    }
+}

@@ -10,6 +10,7 @@ internal sealed class ManualTransferQueue
         public required Limit[] Limits;
         public required CancellationToken Token;
         public bool Paused;
+        public int Priority;
         public readonly TaskCompletionSource<IDisposable> Ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
@@ -22,6 +23,7 @@ internal sealed class ManualTransferQueue
     private readonly object _sync = new();
     private readonly List<Entry> _pending = new();
     private readonly Dictionary<string, int> _active = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _capacities = new(StringComparer.OrdinalIgnoreCase);
     private int _suspended;
 
     // Enqueue synchronously, before Task.Run, so thread-pool timing cannot reorder jobs.
@@ -29,11 +31,16 @@ internal sealed class ManualTransferQueue
         => Enqueue(id, token, false, limits);
 
     public Task<IDisposable> Enqueue(string id, CancellationToken token, bool paused, params Limit[] limits)
+        => Enqueue(id, token, paused, 0, limits);
+
+    public Task<IDisposable> Enqueue(string id, CancellationToken token, bool paused, int priority, params Limit[] limits)
     {
-        var entry = new Entry { Id = id, Token = token, Limits = limits, Paused = paused };
+        var entry = new Entry { Id = id, Token = token, Limits = limits, Paused = paused, Priority = priority };
         lock (_sync)
         {
-            _pending.Add(entry);
+            var before = _pending.FindIndex(x => x.Priority > priority);
+            if (before < 0) _pending.Add(entry);
+            else _pending.Insert(before, entry);
             Dispatch();
         }
         return WaitAsync(entry);
@@ -66,6 +73,15 @@ internal sealed class ManualTransferQueue
             var entry = _pending.Find(x => x.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
             if (entry is null) return;
             entry.Paused = paused;
+            Dispatch();
+        }
+    }
+
+    public void SetCapacity(string key, int capacity)
+    {
+        lock (_sync)
+        {
+            _capacities[key] = Math.Max(1, capacity);
             Dispatch();
         }
     }
@@ -119,7 +135,8 @@ internal sealed class ManualTransferQueue
                 entry.Ready.TrySetCanceled(entry.Token);
                 continue;
             }
-            if (entry.Paused || entry.Limits.Any(limit => _active.GetValueOrDefault(limit.Key) >= Math.Max(1, limit.Capacity)))
+            if (entry.Paused || entry.Limits.Any(limit => _active.GetValueOrDefault(limit.Key) >=
+                _capacities.GetValueOrDefault(limit.Key, Math.Max(1, limit.Capacity))))
             {
                 i++;
                 continue;

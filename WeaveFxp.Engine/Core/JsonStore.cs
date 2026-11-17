@@ -47,6 +47,8 @@ public sealed class JsonStore
     private readonly JobArchiveStore _jobArchive;
     private readonly object _lock = new();
     private State _state = new();
+    private long _siteRevision;
+    internal long SiteRevision => Interlocked.Read(ref _siteRevision);
 
     // Best-effort flush when the process exits normally (Ctrl+C / service stop).
     private void HookProcessExit()
@@ -496,6 +498,7 @@ public sealed class JsonStore
             if (_state.Sites.TryGetValue(k, out var existing) && existing.CreatedAt != default)
                 site.CreatedAt = existing.CreatedAt;
             _state.Sites[k] = site;
+            Interlocked.Increment(ref _siteRevision);
             SaveLocked(StateSections.Sites);
             return Clone(site);
         }
@@ -534,6 +537,7 @@ public sealed class JsonStore
             }
 
             _state.Sites[newKey] = site;
+            Interlocked.Increment(ref _siteRevision);
             SaveLocked(StateSections.Sites | StateSections.Settings, critical: true);
             return Clone(site);
         }
@@ -545,6 +549,7 @@ public sealed class JsonStore
         {
             Ensure();
             var removed = _state.Sites.Remove(Key(name));
+            if (removed) Interlocked.Increment(ref _siteRevision);
             if (removed)
                 _state.Settings.SiteOrder.RemoveAll(s => s.Equals(name, StringComparison.OrdinalIgnoreCase));
             if (removed) SaveLocked(StateSections.Sites | StateSections.Settings, critical: true);
@@ -556,6 +561,16 @@ public sealed class JsonStore
     {
         lock (_lock)
             return _state.Sites.TryGetValue(Key(name), out var s) ? Clone(s) : null;
+    }
+
+    // Evaluate both current policies under one lock, without cloning site credentials
+    // and configuration on the per-file scheduling path. Deleted sites fail closed.
+    internal bool TransferAllowed(string source, string destination, bool race)
+    {
+        lock (_lock)
+            return _state.Sites.TryGetValue(Key(source), out var src) &&
+                _state.Sites.TryGetValue(Key(destination), out var dst) &&
+                (!race || (src.AllowDownload && dst.AllowUpload)) && src.CanTransferTo(dst);
     }
 
     public List<Site> Sites()
@@ -577,18 +592,19 @@ public sealed class JsonStore
                 job.HeartbeatAt = DateTime.UtcNow;
             _state.Jobs[job.Id] = job;
             PruneJobsLocked(job.Terminal);
-            InvalidateJobsSnapshotLocked();
+            InvalidateJobsSnapshotLocked(job.Id);
             SaveLocked(StateSections.Jobs);
             return Clone(job);
         }
     }
 
-    public Job? UpdateJob(string id, Action<Job> update)
+    public Job? UpdateJob(string id, Action<Job> update, bool headerOnly = false)
     {
         lock (_lock)
         {
             Ensure();
             if (!_state.Jobs.TryGetValue(id, out var job)) return null;
+            var wasTerminal = job.Terminal;
             update(job);
             if (job.State == JobState.Running)
                 job.HeartbeatAt = DateTime.UtcNow;
@@ -598,10 +614,11 @@ public sealed class JsonStore
                 // cap bounds total history; trimming here made the race detail view lie.
                 job.Slots = new List<SlotProgress>();
             }
-            PruneJobsLocked(job.Terminal);
-            InvalidateJobsSnapshotLocked();
+            // Retention needs disk work only when the terminal history changes.
+            if (!wasTerminal && job.Terminal) PruneJobsLocked();
+            InvalidateJobsSnapshotLocked(id);
             SaveLocked(StateSections.Jobs);
-            return Clone(job);
+            return headerOnly ? CloneJobHeader(job) : Clone(job);
         }
     }
 
@@ -616,6 +633,7 @@ public sealed class JsonStore
             update(job);
             if (job.State == JobState.Running)
                 job.HeartbeatAt = DateTime.UtcNow;
+            if (job.Terminal) _uiFileCounts.Remove(id);
             return CloneJobHeader(job);
         }
     }
@@ -638,7 +656,7 @@ public sealed class JsonStore
             job.SpeedBps = 0;
             job.Events.Add(new JobEvent { Time = now, Level = "error", Message = reason });
             _state.Jobs[id] = job;
-            InvalidateJobsSnapshotLocked();
+            InvalidateJobsSnapshotLocked(id);
             SaveLocked(StateSections.Jobs);
             return Clone(job);
         }
@@ -683,6 +701,85 @@ public sealed class JsonStore
             : JsonSerializer.Deserialize<Job>(archived, JsonOptions);
     }
 
+    public Job? JobHeader(string id)
+    {
+        lock (_lock)
+            if (_state.Jobs.TryGetValue(id, out var job))
+            {
+                var header = CloneJobHeader(job);
+                header.Request = Clone(job.Request);
+                return header;
+            }
+        return Job(id);
+    }
+
+    // UI lists need counters, not a JSON round-trip of every historical attempt.
+    // Expanded jobs retain the full SFV inventory; only attempt/event history is bounded.
+    public int HotJobCount { get { lock (_lock) return _state.Jobs.Count; } }
+
+    internal List<Job> ActiveApiRaceHeaders()
+    {
+        lock (_lock) return _state.Jobs.Values.Where(j => j.Type == JobType.Race && !j.Terminal && j.Request.ViaApi)
+            .Select(j => { var h = CloneJobHeader(j); h.Request = Clone(j.Request); return h; }).ToList();
+    }
+
+    private readonly Dictionary<string, (int Names, int Covered, int Done, long Bytes)> _uiFileCounts = new(StringComparer.OrdinalIgnoreCase);
+
+    public List<Job> JobsForUi(IEnumerable<string>? expandedJobs = null, bool includeManualEvents = false)
+    {
+        var expanded = (expandedJobs ?? Array.Empty<string>()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        lock (_lock)
+        {
+            return _state.Jobs.Values.OrderByDescending(j => j.CreatedAt).Select(job =>
+            {
+                var result = CloneJobHeader(job);
+                result.Request = Clone(job.Request);
+                result.Slots = job.Slots.Select(Clone).ToList();
+                (int Names, int Covered, int Done, long Bytes) counts = default;
+                // Live race counters belong to this run. Old attempts are kept for detail/history,
+                // but must not be re-scanned (or added to a retry's reset counters) every frame.
+                if ((job.Terminal || !job.RaceCoverageKnown) &&
+                    (!job.Terminal || !_uiFileCounts.TryGetValue(job.Id, out counts)))
+                {
+                    var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var covered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var done = 0;
+                    long bytes = 0;
+                    foreach (var file in job.Files)
+                    {
+                        if (file.Name.EndsWith("-MISSING", StringComparison.OrdinalIgnoreCase)) continue;
+                        names.Add(file.Name);
+                        if (file.Status is "done" or "dupe") covered.Add(file.Name);
+                        if (file.Status == "done") { done++; bytes += Math.Max(0, file.Size); }
+                    }
+                    counts = (names.Count, covered.Count, done, bytes);
+                    if (job.Terminal) _uiFileCounts[job.Id] = counts;
+                }
+                if (!result.RaceCoverageKnown) result.FilesTotal = Math.Max(result.FilesTotal, counts.Names);
+                if (!result.RaceCoverageKnown) result.FilesCovered = Math.Max(result.FilesCovered, counts.Covered);
+                result.FilesDone = Math.Max(result.FilesDone, counts.Done);
+                result.CumulativeBytes = Math.Max(result.CumulativeBytes, counts.Bytes);
+                if (expanded.Contains(job.Id))
+                {
+                    result.Files = job.Files.TakeLast(500).Select(Clone).ToList();
+                    result.SfvFiles = job.SfvFiles.Select(Clone).ToList();
+                }
+                if (expanded.Contains(job.Id) || (includeManualEvents && job.Type != JobType.Race))
+                    result.Events = job.Events.TakeLast(200).Select(Clone).ToList();
+                if (result.Terminal) result.SpeedBps = 0;
+                return result;
+            }).ToList();
+        }
+    }
+
+    public List<FileTransfer> CompletedTransferSamples()
+    {
+        lock (_lock)
+            return _state.Jobs.Values.SelectMany(j => j.Files)
+                .Where(f => f.Status == "done" && f.Bps > 0 && f.Size >= 1024 * 1024)
+                .Select(f => new FileTransfer { Status = "done", FromSite = f.FromSite, ToSite = f.ToSite, Size = f.Size, Bps = f.Bps, StartedAt = f.StartedAt }).ToList();
+    }
+
     // Cloning every job (JSON round-trip, thousands of events each) for every UI
     // refresh was an allocation firehose — with several pages open it churned
     // gigabytes per minute. Serve a snapshot, rebuilt at most every 250ms.
@@ -690,10 +787,16 @@ public sealed class JsonStore
     private DateTime _jobsSnapshotAt;
     private readonly Dictionary<string, Job> _terminalJobSnapshots = new(StringComparer.OrdinalIgnoreCase);
 
-    private void InvalidateJobsSnapshotLocked()
+    private void InvalidateJobsSnapshotLocked(string? changedId = null)
     {
         _jobsSnapshot = null;
         _jobsSnapshotAt = default;
+        if (changedId is null) _uiFileCounts.Clear();
+        else
+        {
+            _uiFileCounts.Remove(changedId);
+            _terminalJobSnapshots.Remove(changedId);
+        }
     }
 
     public List<Job> Jobs()
@@ -993,6 +1096,8 @@ public sealed class JsonStore
         CumulativeBytes = job.CumulativeBytes,
         SpeedBps = job.SpeedBps,
         FilesDone = job.FilesDone,
+        FilesCovered = job.FilesCovered,
+        RaceCoverageKnown = job.RaceCoverageKnown,
         FilesTotal = job.FilesTotal,
         CurrentFile = job.CurrentFile,
         HeartbeatAt = job.HeartbeatAt,

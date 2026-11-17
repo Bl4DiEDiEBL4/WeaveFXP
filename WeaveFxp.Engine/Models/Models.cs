@@ -22,6 +22,29 @@ public enum SslDataClientSide { Auto, Source, Destination }
 // Block = trade with no one (except list = allowlist).
 public enum SiteTransferPolicy { Allow, Block }
 
+// Pre routing: a release whose group is one of a site's affils is a pre from that site.
+// Only  - the pre goes ONLY to the site's pre targets (other requested sites are dropped)
+// First - every requested site still gets it, but the pre targets are served first
+public enum PreRouteMode { Only, First }
+
+// cbftp site priority: in a race with several targets, a higher-priority target gets
+// files before lower-priority ones whenever source slots are contended.
+public enum SitePriority { VeryLow, Low, Normal, High, VeryHigh }
+
+// How often a race lists this site. Normal = the global race poll interval; Very high
+// lists back-to-back (next listing as soon as the previous reply is in).
+public enum ListFrequency { Low, Normal, High, VeryHigh }
+
+// Race actions: which files to delete on a site.
+public enum RaceFileScope { None, Own, All }
+
+public sealed class RaceActionResult
+{
+    public bool Ok { get; set; } = true;
+    public List<string> Lines { get; set; } = new();
+    public string? NewJobId { get; set; }
+}
+
 public enum TransferProtocol { PreferIPv4, IPv4Only, IPv6Only, Any }
 
 public enum ApiListenMode { Local, All, Interface }
@@ -60,6 +83,7 @@ public sealed class AppSettings
     public string WebBindAddress { get; set; } = "127.0.0.1";
     public int WebPort { get; set; } = 8788;
     public bool AutoOpenWebUi { get; set; } = true;
+    public bool ShowConsoleOnStartup { get; set; }
     public string BindInterface { get; set; } = "";
     public TransferProtocol LocalTransferProtocol { get; set; } = TransferProtocol.PreferIPv4;
     public PortRange ActiveModePortRange { get; set; } = new();
@@ -108,10 +132,16 @@ public sealed class AppSettings
     public Dictionary<string, bool> FxpTlsRoleFlip { get; set; } = new();
     public int RacePollIntervalMs { get; set; } = DefaultRacePollIntervalMs;
     public int RaceMaxIdleCycles { get; set; } = 600;
+    public int IncompleteRaceRetries { get; set; } = 3;
+    public int IncompleteRaceRetryDelaySeconds { get; set; } = 30;
+    public int RaceCompletionRecheckSeconds { get; set; } = 300;
     public bool RaceDestinationPrecheck { get; set; }
+    // Create the release dir on every target the moment a race is announced (RaceTrade
+    // style) instead of when the first file arrives. Sites can opt out (Site.NoPrecreateDir).
+    public bool PrecreateRaceDirs { get; set; }
     public int JobWatchdogTimeoutMinutes { get; set; } = 120;
     public bool SkipEmptyFolders { get; set; } = true;
-    public List<string> GlobalSkiplist { get; set; } = new();
+    public List<SkiplistEntry> GlobalSkiplist { get; set; } = new();
     public int GlobalSkiplistDefaultsVersion { get; set; }
     public List<string> GlobalOrderList { get; set; } = new();
     public List<string> SiteOrder { get; set; } = new();
@@ -188,14 +218,17 @@ public sealed class AppSettings
         // ~60 SECONDS of no list changes — at a 25ms poll that needs ~600 cycles.
         if (RaceMaxIdleCycles <= 60) RaceMaxIdleCycles = 600;
         RaceMaxIdleCycles = Math.Clamp(RaceMaxIdleCycles, 61, 100000);
+        IncompleteRaceRetries = Math.Clamp(IncompleteRaceRetries, 0, 20);
+        IncompleteRaceRetryDelaySeconds = Math.Clamp(IncompleteRaceRetryDelaySeconds, 1, 3600);
+        RaceCompletionRecheckSeconds = Math.Clamp(RaceCompletionRecheckSeconds, 0, 3600);
         if (JobWatchdogTimeoutMinutes == 0) JobWatchdogTimeoutMinutes = 120;
         JobWatchdogTimeoutMinutes = Math.Clamp(JobWatchdogTimeoutMinutes, 5, 10080);
-        GlobalSkiplist = NormalizeList(GlobalSkiplist);
+        GlobalSkiplist = SkiplistEntry.NormalizeList(GlobalSkiplist);
         if (GlobalSkiplistDefaultsVersion < CurrentGlobalSkiplistDefaultsVersion)
         {
             foreach (var pattern in DefaultGlobalSkiplistPatterns)
-                if (!GlobalSkiplist.Contains(pattern, StringComparer.OrdinalIgnoreCase))
-                    GlobalSkiplist.Add(pattern);
+                if (!GlobalSkiplist.Any(e => e.Pattern.Equals(pattern, StringComparison.OrdinalIgnoreCase)))
+                    GlobalSkiplist.Add(SkiplistEntry.DenyPattern(pattern));
             GlobalSkiplistDefaultsVersion = CurrentGlobalSkiplistDefaultsVersion;
         }
         GlobalOrderList = NormalizeList(GlobalOrderList);
@@ -249,7 +282,7 @@ public sealed class AppSettings
         clone.DataProxyPasswordSet = !string.IsNullOrEmpty(DataProxyPassword);
         clone.DataProxyPassword = "";
         clone.ActiveModePortRange = new PortRange { Start = ActiveModePortRange.Start, End = ActiveModePortRange.End };
-        clone.GlobalSkiplist = new List<string>(GlobalSkiplist);
+        clone.GlobalSkiplist = GlobalSkiplist.Select(e => e.Clone()).ToList();
         clone.GlobalOrderList = new List<string>(GlobalOrderList);
         clone.SiteOrder = new List<string>(SiteOrder);
         clone.BrowserFavorites = BrowserFavorites.Select(f => new BrowserFavorite
@@ -326,6 +359,14 @@ public sealed class Site
     public List<string> ExceptSourceSites { get; set; } = new();
     public List<string> ExceptTargetSites { get; set; } = new();
 
+    // Pres from this site (group is in Affils) go only to / first to these sites.
+    public List<string> PreTargetSites { get; set; } = new();
+    public PreRouteMode PreRouteMode { get; set; } = PreRouteMode.Only;
+    // Never create the release dir at race start on this site (e.g. it nukes empty dirs).
+    public bool NoPrecreateDir { get; set; }
+    public SitePriority Priority { get; set; } = SitePriority.Normal;
+    public ListFrequency ListFrequency { get; set; } = ListFrequency.Normal;
+
     // cbftp Site::isAllowedTargetSite: exception sites take the opposite of the policy.
     public bool IsAllowedTargetSite(string dstName) =>
         ExceptTargetSites.Any(s => s.Equals(dstName, StringComparison.OrdinalIgnoreCase))
@@ -336,13 +377,17 @@ public sealed class Site
         ExceptSourceSites.Any(s => s.Equals(srcName, StringComparison.OrdinalIgnoreCase))
             ? TransferSourcePolicy == SiteTransferPolicy.Block
             : TransferSourcePolicy == SiteTransferPolicy.Allow;
+
+    public bool CanTransferTo(Site destination) =>
+        !BlockTransferFrom && !destination.BlockTransferTo &&
+        IsAllowedTargetSite(destination.Name) && destination.IsAllowedSourceSite(Name);
     // Slow-skip: abort a race transfer that averages below this (KB/s) and move on.
     // FXP bytes don't pass through us, so this is enforced as a per-file time budget
     // (size / threshold + grace). 0 = off.
     public int SlowSkipKBps { get; set; }
     public List<string> CompleteMarkers { get; set; } = DefaultCompleteMarkers();
     public List<string> Affils { get; set; } = new();
-    public List<string> Skiplist { get; set; } = new();
+    public List<SkiplistEntry> Skiplist { get; set; } = new();
     public List<SiteSection> Sections { get; set; } = new();
     public int TimeoutSeconds { get; set; } = 30;
     public DateTime CreatedAt { get; set; }
@@ -369,7 +414,9 @@ public sealed class Site
         CompleteMarkers = NormalizeList(CompleteMarkers);
         if (CompleteMarkers.Count == 0) CompleteMarkers = DefaultCompleteMarkers();
         Affils = NormalizeList(Affils);
-        Skiplist = NormalizeList(Skiplist);
+        Skiplist = SkiplistEntry.NormalizeList(Skiplist);
+        PreTargetSites = NormalizeList(PreTargetSites)
+            .Where(n => !n.Equals(Name, StringComparison.OrdinalIgnoreCase)).ToList();
         var now = DateTime.UtcNow;
         if (CreatedAt == default) CreatedAt = now;
         UpdatedAt = now;
@@ -425,9 +472,10 @@ public sealed class Site
         clone.Sections = new List<SiteSection>(Sections);
         clone.CompleteMarkers = new List<string>(CompleteMarkers);
         clone.Affils = new List<string>(Affils);
-        clone.Skiplist = new List<string>(Skiplist);
+        clone.Skiplist = Skiplist.Select(e => e.Clone()).ToList();
         clone.ExceptSourceSites = new List<string>(ExceptSourceSites);
         clone.ExceptTargetSites = new List<string>(ExceptTargetSites);
+        clone.PreTargetSites = new List<string>(PreTargetSites);
         return clone;
     }
 }
@@ -458,6 +506,9 @@ public sealed class TransferRequest
     public string DestPath { get; set; } = "";
     public List<string> MeshSites { get; set; } = new();
     public Dictionary<string, string> SitePaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> DownloadOnlySites { get; set; } = new();
+    // Pre routing (mode First): mesh destinations that get every file before the rest.
+    public List<string> PreFirstTargets { get; set; } = new();
     public bool Race { get; set; }
     public bool DryRun { get; set; }
     public string Label { get; set; } = "";
@@ -482,11 +533,14 @@ public sealed class SpreadRequest
     public string SourcePath { get; set; } = "";
     public string DestPath { get; set; } = "";
     public Dictionary<string, string> SitePaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<string> DownloadOnlySites { get; set; } = new();
     public bool Race { get; set; }
     public bool DryRun { get; set; }
     public string Label { get; set; } = "";
     public int MaxParallel { get; set; }
     public bool ViaApi { get; set; }
+    // Set by pre routing (mode First): destinations served before the others.
+    public List<string> PreFirstTargets { get; set; } = new();
 }
 
 public sealed class SpreadResult
@@ -545,6 +599,7 @@ public sealed class Job
     public double SpeedBps { get; set; }
     public int FilesDone { get; set; }
     public int FilesCovered { get; set; }
+    public bool RaceCoverageKnown { get; set; }
     public int FilesTotal { get; set; }
     public string CurrentFile { get; set; } = "";
     public bool Paused { get; set; }
@@ -557,6 +612,9 @@ public sealed class Job
     // snapshot once done. Capped in the engine.
     public List<FileTransfer> Files { get; set; } = new();
 
+    // Expected SFV contents are separate from the bounded transfer-attempt view.
+    public List<RaceSfvFile> SfvFiles { get; set; } = new();
+
     // 0..100, or -1 when indeterminate (unknown total).
     public int Percent
     {
@@ -565,7 +623,7 @@ public sealed class Job
             if (BytesTotal > 0) return (int)Math.Clamp(BytesDone * 100 / BytesTotal, 0, 100);
             if (FilesTotal > 0)
             {
-                var covered = Request.MeshSites.Count > 1 ? FilesCovered : Math.Max(FilesDone, FilesCovered);
+                var covered = RaceCoverageKnown || Request.MeshSites.Count > 1 ? FilesCovered : Math.Max(FilesDone, FilesCovered);
                 return (int)Math.Clamp((long)covered * 100 / FilesTotal, 0, 100);
             }
             return -1;
@@ -586,9 +644,19 @@ public sealed class SiteHourStat
     public double Seconds { get; set; }  // summed transfer durations, for avg speed
 }
 
-// One file transfer inside a race.
-// A new row is added per attempt (failed attempts stay visible), duration and the
-// speed snapshot (size / duration) are filled in when the file completes.
+// One expected SFV entry; coverage and our upload evidence are independent.
+public sealed class RaceSfvFile
+{
+    public string Name { get; set; } = "";
+    public string Crc { get; set; } = "";
+    public string Sfv { get; set; } = "";
+    public long? Size { get; set; }
+    public string Status { get; set; } = "unknown"; // covered | waiting | missing | unknown
+    public bool UploadedByUs { get; set; }
+    public long? UploadedSize { get; set; }
+}
+
+// One row per transfer attempt, retaining failed attempts and completed timings.
 public sealed class FileTransfer
 {
     public DateTime StartedAt { get; set; }
@@ -598,6 +666,8 @@ public sealed class FileTransfer
     public long Size { get; set; }
     public double Seconds { get; set; }              // 0 while in flight
     public double Bps { get; set; }                  // snapshot: size / duration
+    public long? ObservedBytes { get; set; } // latest destination LIST observation; not credited until done
+    public DateTime? ProgressObservedAt { get; set; }
     public string Status { get; set; } = "active";   // active | done | fail | dupe | wait
     public string Error { get; set; } = "";
 }
@@ -659,6 +729,15 @@ public sealed class DupeResult
     public bool Exists { get; set; }
     public List<RemoteEntry> Matches { get; set; } = new();
     public DateTime CheckedAt { get; set; }
+}
+
+// One dir of a (multi-dir) SITE NUKE from the browser.
+public sealed class NukeResult
+{
+    public string Path { get; set; } = "";
+    public int Code { get; set; }
+    public string Message { get; set; } = "";
+    public bool Ok { get; set; }
 }
 
 public sealed class RawCommandResult

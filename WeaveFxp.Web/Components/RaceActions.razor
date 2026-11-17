@@ -1,0 +1,224 @@
+@* cbftp spread-job actions for one race (Races page → Actions). Destructive actions ask
+   for a confirmation first. Styles are scoped to .wfx-ra so app.css is untouched. *@
+@inject WeaveEngine Engine
+
+<div class="modal-backdrop" @onclick="Close"></div>
+<section class="modal race-actions-modal wfx-ra" role="dialog" aria-modal="true" aria-labelledby="race-actions-title">
+    <header>
+        <h3 id="race-actions-title">Race actions: @Label</h3>
+        <button class="secondary icon-btn" title="Close" disabled="@_busy" @onclick="Close">×</button>
+    </header>
+    <p class="hint">@(Running ? "The race is running." : "The race has ended.") Own files = files WeaveFXP uploaded to that site in this race.</p>
+
+    <div class="table-wrap">
+        <table class="data-table wfx-ra-sites">
+            <thead>
+                <tr><th>Site</th><th>Own files</th><th>Release path</th><th></th></tr>
+            </thead>
+            <tbody>
+                @foreach (var site in _sites)
+                {
+                    var removed = _removed.Contains(site);
+                    <tr>
+                        <td class="strong">
+                            @site
+                            @if (removed)
+                            {
+                                <span class="pill amber">removed</span>
+                            }
+                        </td>
+                        <td class="mono">@(_own.TryGetValue(site, out var count) ? count : 0)</td>
+                        <td class="mono dim">@(Engine.RaceReleasePath(JobId, site) ?? "—")</td>
+                        <td class="wfx-ra-btns">
+                            @if (Running && !removed)
+                            {
+                                <button class="secondary slim" disabled="@_busy" @onclick="() => RemoveSite(site, RaceFileScope.None)">Remove</button>
+                                <button class="secondary slim" disabled="@_busy" @onclick="() => RemoveSite(site, RaceFileScope.Own)">Remove + own files</button>
+                                <button class="secondary slim danger" disabled="@_busy" @onclick="() => RemoveSite(site, RaceFileScope.All)">Remove + all files</button>
+                                <button class="secondary slim" disabled="@_busy" @onclick="() => RemoveFromAll(site)">Remove from all races</button>
+                            }
+                            else
+                            {
+                                <button class="secondary slim" disabled="@_busy" @onclick="() => DeleteOn(site, RaceFileScope.Own)">Delete own files</button>
+                                <button class="secondary slim danger" disabled="@_busy" @onclick="() => DeleteOn(site, RaceFileScope.All)">Delete all files</button>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    <div class="wfx-ra-row">
+        @if (Running)
+        {
+            <button class="secondary slim danger" disabled="@_busy" @onclick="() => Abort(RaceFileScope.None, false)">Abort</button>
+            <button class="secondary slim danger" disabled="@_busy" @onclick="() => Abort(RaceFileScope.Own, true)">Abort + delete own files on incomplete sites</button>
+            <button class="secondary slim danger" disabled="@_busy" @onclick="() => Abort(RaceFileScope.Own, false)">Abort + delete own files on ALL sites</button>
+        }
+        else
+        {
+            <button class="secondary slim danger" disabled="@_busy" @onclick="DeleteOwnEverywhere">Delete own files on ALL sites</button>
+        }
+        <button class="secondary slim" disabled="@_busy" @onclick="() => Reset(false)">Reset</button>
+        <button class="secondary slim" disabled="@_busy" @onclick="() => Reset(true)">Hard reset</button>
+    </div>
+
+    <div class="wfx-ra-add">
+        <select @bind="_addSite" @bind:after="SuggestPath">
+            <option value="">Add a site…</option>
+            @foreach (var site in _addable)
+            {
+                <option value="@site">@site</option>
+            }
+        </select>
+        <input placeholder="release path on that site (filled from the section when it matches)" @bind="_addPath" @bind:event="oninput" />
+        <button class="secondary slim" disabled="@(_busy || string.IsNullOrEmpty(_addSite))" @onclick="AddSite">Add site</button>
+    </div>
+
+    @if (_confirmText is not null)
+    {
+        <div class="wfx-ra-confirm">
+            <span>@_confirmText</span>
+            <button class="danger slim" disabled="@_busy" @onclick="Confirm">Yes, do it</button>
+            <button class="secondary slim" disabled="@_busy" @onclick="CancelConfirm">No</button>
+        </div>
+    }
+    @if (_busy)
+    {
+        <p class="hint">Working…</p>
+    }
+    @if (_output.Count > 0)
+    {
+        <pre class="console">@string.Join("\n", _output)</pre>
+    }
+</section>
+
+<style>
+    .wfx-ra { max-width: min(1100px, 96vw); }
+    .wfx-ra-btns { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+    .wfx-ra-row, .wfx-ra-add, .wfx-ra-confirm { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
+    .wfx-ra-add input { flex: 1 1 260px; min-width: 0; }
+    .wfx-ra-confirm { padding: 8px 10px; border: 1px solid rgba(255, 91, 120, 0.45); border-radius: 8px; }
+    .wfx-ra-confirm span { flex: 1 1 auto; }
+</style>
+
+@code {
+    [Parameter, EditorRequired] public string JobId { get; set; } = "";
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private Job? _job;
+    private List<string> _sites = new();
+    private HashSet<string> _removed = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, int> _own = new(StringComparer.OrdinalIgnoreCase);
+    private List<string> _addable = new();
+    private string _addSite = "";
+    private string _addPath = "";
+    private bool _busy;
+    private string? _confirmText;
+    private Func<Task<RaceActionResult>>? _pending;
+    private readonly List<string> _output = new();
+
+    private bool Running => _job is { Terminal: false };
+    private string Label => _job is null ? JobId : string.IsNullOrWhiteSpace(_job.Request.Label) ? _job.Id : _job.Request.Label;
+
+    protected override void OnParametersSet() => Reload();
+
+    private void Reload()
+    {
+        _job = Engine.Job(JobId);
+        _own = Engine.RaceOwnFileCounts(JobId);
+        _removed = new HashSet<string>(Engine.RaceRemovedSiteNames(JobId), StringComparer.OrdinalIgnoreCase);
+        _sites = Engine.RaceSiteNames(JobId).Concat(_removed).Concat(_own.Keys)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        _addable = Engine.Sites(false).Select(s => s.Name)
+            .Where(n => !_sites.Contains(n, StringComparer.OrdinalIgnoreCase) || _removed.Contains(n))
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private Task Close() => _busy ? Task.CompletedTask : OnClose.InvokeAsync();
+
+    private void SuggestPath() => _addPath = string.IsNullOrEmpty(_addSite) ? "" : Engine.SuggestRacePathForSite(JobId, _addSite) ?? "";
+
+    private void Ask(string text, Func<Task<RaceActionResult>> action)
+    {
+        _confirmText = text;
+        _pending = action;
+    }
+
+    private void CancelConfirm()
+    {
+        _confirmText = null;
+        _pending = null;
+    }
+
+    private async Task Confirm()
+    {
+        var action = _pending;
+        CancelConfirm();
+        if (action is not null) await Run(action);
+    }
+
+    private async Task Run(Func<Task<RaceActionResult>> action)
+    {
+        if (_busy) return;
+        _busy = true;
+        StateHasChanged();
+        try
+        {
+            var result = await action();
+            _output.AddRange(result.Lines.Select(l => (result.Ok ? "" : "! ") + l));
+        }
+        catch (Exception ex)
+        {
+            _output.Add("! " + ex.Message);
+        }
+        finally
+        {
+            _busy = false;
+            Reload();
+        }
+    }
+
+    private Task RemoveSite(string site, RaceFileScope scope)
+    {
+        if (scope == RaceFileScope.None)
+            return Run(() => Engine.RemoveSiteFromRaceAsync(JobId, site, scope));
+        Ask(scope == RaceFileScope.All
+                ? $"Remove {site} from the race and delete ALL files of this release on {site}?"
+                : $"Remove {site} from the race and delete our own files on {site}?",
+            () => Engine.RemoveSiteFromRaceAsync(JobId, site, scope));
+        return Task.CompletedTask;
+    }
+
+    private Task RemoveFromAll(string site) => Run(() => Task.FromResult(Engine.RemoveSiteFromAllRaces(site)));
+
+    private void DeleteOn(string site, RaceFileScope scope) => Ask(scope == RaceFileScope.All
+            ? $"Delete ALL files of this release on {site} (the whole release dir)?"
+            : $"Delete our own files on {site}?",
+        () => Engine.DeleteRaceFilesAsync(JobId, site, scope, onlyIncomplete: false));
+
+    private void DeleteOwnEverywhere() => Ask("Delete our own files on ALL sites of this race?",
+        () => Engine.DeleteRaceFilesAsync(JobId, null, RaceFileScope.Own, onlyIncomplete: false));
+
+    private Task Abort(RaceFileScope scope, bool onlyIncomplete)
+    {
+        if (scope == RaceFileScope.None)
+            return Run(() => Engine.AbortRaceAsync(JobId, scope, onlyIncomplete));
+        Ask(onlyIncomplete
+                ? "Abort the race and delete our own files on every site where the release is NOT complete?"
+                : "Abort the race and delete our own files on ALL sites?",
+            () => Engine.AbortRaceAsync(JobId, scope, onlyIncomplete));
+        return Task.CompletedTask;
+    }
+
+    private Task Reset(bool hard)
+    {
+        if (!hard) return Run(() => Engine.ResetRaceAsync(JobId, false));
+        Ask("Hard reset forgets this race's file history (own-file tracking too) and restarts it. Continue?",
+            () => Engine.ResetRaceAsync(JobId, true));
+        return Task.CompletedTask;
+    }
+
+    private Task AddSite() => Run(() => Task.FromResult(Engine.AddSiteToRace(JobId, _addSite, _addPath)));
+}

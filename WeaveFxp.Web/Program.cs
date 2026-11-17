@@ -16,6 +16,7 @@ using WeaveFxp.Web.Components;
 var appDir = AppContext.BaseDirectory;
 var engine = new WeaveEngine();
 var startupSettings = engine.Settings(false);
+TrayNotificationService.ConfigureStartupConsole(startupSettings.ShowConsoleOnStartup);
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
     Args = args,
@@ -163,7 +164,7 @@ api.MapGet("/health", () => new
     state_path = engine.StatePath,
     data_dir = engine.DataDir,
     load_warning = engine.LoadWarning,
-    jobs = engine.Jobs().Count,
+    jobs = engine.JobCount,
     archived_jobs = engine.ArchivedJobCount(),
     releases = engine.Releases().Count,
 });
@@ -177,7 +178,9 @@ api.MapDelete("/sites/{name}", (string name) =>
     engine.RemoveSite(name);
     return Results.NoContent();
 });
-api.MapGet("/jobs", () => engine.Jobs());
+api.MapGet("/jobs", (bool? summary) => summary == true ? engine.JobsForUi() : engine.Jobs());
+api.MapGet("/jobs/{id}", (string id) => engine.Job(id) is { } job
+    ? Results.Ok(job) : Results.NotFound(new { error = "job not found" }));
 api.MapPost("/searches", (SiteSearchRequest request) => SearchAction(() =>
 {
     var search = engine.StartSiteSearch(request);
@@ -207,6 +210,10 @@ api.MapPost("/jobs/{id}/retry", (string id) =>
         ? Results.Ok(new { id, retried = true })
         : Results.NotFound();
 });
+api.MapPost("/jobs/{id}/recheck", async (string id, CancellationToken ct) =>
+    await engine.RecheckRaceAsync(id, ct)
+        ? Results.Ok(new { id, complete = true })
+        : Results.Conflict(new { id, complete = false, error = "No stable complete evidence, or job is not a failed race" }));
 api.MapPost("/jobs/{id}/move/{direction:int}", (string id, int direction) =>
     engine.MoveManualJob(id, direction) ? Results.Ok(new { moved = true }) : Results.Conflict(new { error = "Job cannot move in that direction" }));
 api.MapPost("/jobs/{id}/restart", (string id) =>
@@ -233,6 +240,11 @@ api.MapDelete("/dupes", () => Results.Ok(new { cleared = engine.ClearDupes() }))
 api.MapDelete("/runtime-data", () => Results.Ok(engine.ClearRuntimeData()));
 api.MapPost("/fxp", (TransferRequest request) => { request.ViaApi = true; return engine.StartFxp(request); });
 api.MapPost("/spread", (SpreadRequest request) => { request.ViaApi = true; return engine.StartSpread(request); });
+api.MapGet("/prepared-spreads", () => engine.PreparedSpreads());
+api.MapPost("/prepared-spreads", (SpreadRequest request, int? ttlSeconds) => SearchAction(() =>
+{ request.ViaApi = true; return Results.Ok(engine.PrepareSpread(request, ttlSeconds ?? 300)); }));
+api.MapPost("/prepared-spreads/{id}/start", (string id) => SearchAction(() => Results.Ok(engine.StartPreparedSpread(id))));
+api.MapDelete("/prepared-spreads/{id}", (string id) => Results.Ok(new { removed = engine.CancelPreparedSpread(id) }));
 api.MapPost("/download", (DownloadRequest request) => { request.ViaApi = true; return engine.StartDownload(request); });
 api.MapPost("/upload", (UploadRequest request) => { request.ViaApi = true; return engine.StartUpload(request); });
 api.MapPost("/dupe", async (DupeRequest request) =>
@@ -472,13 +484,13 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
                 except_target_sites = site.ExceptTargetSites,
                 // dtool's line parser finalises source/target lists on this key.
                 force_binary_mode = site.ForceBinary,
-                skiplist = site.Skiplist.Select(pattern => new
+                skiplist = site.Skiplist.Select(rule => new
                 {
-                    action = "DENY",
-                    dir = true,
-                    file = true,
-                    pattern,
-                    regex = false,
+                    action = rule.Action.ToString().ToUpperInvariant(),
+                    dir = rule.Dir,
+                    file = rule.File,
+                    pattern = rule.Pattern,
+                    regex = rule.Regex,
                     scope = "ALL",
                 }).ToArray(),
             };
@@ -644,6 +656,8 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
             var section = JsonString(doc.RootElement, "section", "src_section", "dst_section");
             var sites = JsonStringList(doc.RootElement, "sites", "dst_sites", "destination_sites", "target_sites");
             var sourceOnly = JsonStringList(doc.RootElement, "sites_dlonly", "src_sites", "source_sites");
+            if (doc.RootElement.TryGetProperty("sites_all", out var allSites) && allSites.ValueKind == JsonValueKind.True)
+                sites = engine.Sites(true).Where(site => TryResolveRequiredSectionBasePath(site, section, out _)).Select(site => site.Name).ToList();
             if (string.IsNullOrWhiteSpace(release))
                 return await JsonStatus(ctx, StatusCodes.Status400BadRequest, new { error = "name is required" });
             if (string.IsNullOrWhiteSpace(section))
@@ -715,17 +729,29 @@ static async Task<bool> TryHandleWeaveFxpApiAsync(HttpContext ctx, WeaveEngine e
                 pair => pair.Key,
                 pair => MaybeAppendRelease(pair.Value, release),
                 StringComparer.OrdinalIgnoreCase);
-            var spread = engine.StartSpread(new SpreadRequest
+            var spreadRequest = new SpreadRequest
             {
                 FromSite = sourceSite,
                 ToSites = targets,
                 SourcePath = sitePaths[sourceSite],
                 DestPath = sitePaths[targets[0]],
                 SitePaths = sitePaths,
+                DownloadOnlySites = sourceOnly,
                 Label = release,
                 Race = true,
                 ViaApi = true,
-            });
+            };
+            var profile = JsonString(doc.RootElement, "profile").Trim().ToUpperInvariant();
+            if (profile == "PREPARE")
+            {
+                var prepared = engine.PrepareSpread(spreadRequest);
+                return await JsonStatus(ctx, StatusCodes.Status200OK, new { id = CompatNumericId(prepared.Id),
+                    prepared_id = prepared.Id, state = "PREPARED", status = "PREPARED", name = release, section,
+                    expires_at = prepared.ExpiresAt, sites = knownSites, sites_dlonly = sourceOnly });
+            }
+            if (profile is not ("" or "RACE" or "DISTRIBUTE"))
+                return await JsonStatus(ctx, StatusCodes.Status400BadRequest, new { error = "unknown spread profile" });
+            var spread = engine.StartSpread(spreadRequest);
             var batchId = spread.BatchId;
             var compatId = CompatNumericId(batchId);
             var jobs = spread.Jobs;
@@ -1022,7 +1048,7 @@ static string GuessContentType(string path)
 //   <password> fxp <srcsite> <path-or-section> <release> <dstsite> <path-or-section> [dstrelease]
 //   <password> raw <sitelist>|* <raw command...>
 //   <password> download <site> <path-or-section> [name]
-// "distribute"/"prepare" are accepted as "race".
+// "distribute" starts a race; "prepare" only warms and queues a prepared spread.
 static void StartUdpApi(WeaveEngine engine)
 {
     var s = engine.Settings(false);
@@ -1092,8 +1118,16 @@ static void HandleUdpApiMessage(WeaveEngine engine, string text, IPEndPoint from
         {
             case "race":
             case "distribute":
-            case "prepare": // no prepared-job queue — start it right away
                 UdpRace(engine, args);
+                break;
+            case "prepare":
+                UdpRace(engine, args, prepare: true);
+                break;
+            case "startprepared":
+                if (args.Length == 1) engine.StartPreparedSpread(args[0]);
+                break;
+            case "cancelprepared":
+                if (args.Length == 1) engine.CancelPreparedSpread(args[0]);
                 break;
             case "fxp":
                 UdpFxp(engine, args);
@@ -1126,7 +1160,7 @@ static void HandleUdpApiMessage(WeaveEngine engine, string text, IPEndPoint from
     }
 }
 
-static void UdpRace(WeaveEngine engine, string[] args)
+static void UdpRace(WeaveEngine engine, string[] args, bool prepare = false)
 {
     if (args.Length < 3)
     {
@@ -1154,8 +1188,10 @@ static void UdpRace(WeaveEngine engine, string[] args)
         return;
     }
     var targets = sites.Where(n => !n.Equals(srcName, StringComparison.OrdinalIgnoreCase)).ToList();
+    var downloadOnly = args.Length > 3 ? UdpSiteList(engine, args[3]).Where(n => sites.Contains(n, StringComparer.OrdinalIgnoreCase)).ToList() : new List<string>();
     var hasRoute = sites.Any(source => sites.Any(target =>
         !source.Equals(target, StringComparison.OrdinalIgnoreCase) &&
+        !downloadOnly.Contains(target, StringComparer.OrdinalIgnoreCase) &&
         engine.TransferAllowed(engine.Site(source)!, engine.Site(target)!)));
     if (!hasRoute)
     {
@@ -1169,17 +1205,20 @@ static void UdpRace(WeaveEngine engine, string[] args)
         TryResolveRequiredSectionBasePath(engine.Site(siteName)!, section, out var basePath);
         sitePaths[siteName] = MaybeAppendRelease(basePath, release);
     }
-    engine.StartSpread(new SpreadRequest
+    var request = new SpreadRequest
     {
         FromSite = srcName,
         ToSites = targets,
         SourcePath = sitePaths[srcName],
         DestPath = sitePaths[targets[0]],
         SitePaths = sitePaths,
+        DownloadOnlySites = downloadOnly,
         Label = release,
         Race = true,
         ViaApi = true,
-    });
+    };
+    if (prepare) engine.PrepareSpread(request);
+    else engine.StartSpread(request);
 }
 
 static void UdpFxp(WeaveEngine engine, string[] args)

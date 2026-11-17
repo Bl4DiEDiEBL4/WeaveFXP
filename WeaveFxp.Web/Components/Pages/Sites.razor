@@ -238,6 +238,23 @@
 
                             <div class="form-grid">
                                 <label>Minimum race speed (KB/s)<input type="number" min="0" @bind="_form.SlowSkipKBps" placeholder="0 = off" /></label>
+                                <label>Priority
+                                    <select @bind="_form.Priority">
+                                        <option value="@SitePriority.VeryHigh">Very high</option>
+                                        <option value="@SitePriority.High">High</option>
+                                        <option value="@SitePriority.Normal">Normal</option>
+                                        <option value="@SitePriority.Low">Low</option>
+                                        <option value="@SitePriority.VeryLow">Very low</option>
+                                    </select>
+                                </label>
+                                <label>List frequency
+                                    <select @bind="_form.ListFrequency">
+                                        <option value="@ListFrequency.VeryHigh">Very high (list back-to-back)</option>
+                                        <option value="@ListFrequency.High">High (2x the race poll)</option>
+                                        <option value="@ListFrequency.Normal">Normal (race poll interval)</option>
+                                        <option value="@ListFrequency.Low">Low (4x slower)</option>
+                                    </select>
+                                </label>
                                 <label>XDUPE mode
                                     <select @bind="_form.XdupeMode">
                                         <option value="3">3 - detailed file list (recommended)</option>
@@ -248,7 +265,37 @@
                                 </label>
                             </div>
                             <p class="hint">0 disables speed skipping. If a file is too slow, WeaveFXP gives up on that file and races another one.</p>
+                            <p class="hint">Priority: in a race with several targets, a higher-priority site gets the files first when source slots are busy. List frequency: how often a race lists this site; a faster list sees new files sooner but costs the site more commands.</p>
                             <p class="hint">XDUPE asks the FTP server which files already exist. Mode 3 is the normal choice because it returns the most useful duplicate filename information.</p>
+                        </section>
+
+                        <section class="panel-card">
+                            <PanelHeader Title="Pres / release dirs" SaveLabel="Save site" OnSave="Save" />
+                            <p class="hint">A release is a pre from @(string.IsNullOrWhiteSpace(_form.Name) ? "this site" : _form.Name) when its group is one of this site's affils (GROUP or GROUP_iNT).
+                                Tick the sites a pre may go to. No ticks = pres race like any other release.</p>
+                            @if (OtherSiteNames().Any())
+                            {
+                                <div class="checks cards-checks">
+                                    @foreach (var other in OtherSiteNames())
+                                    {
+                                        <label><input type="checkbox"
+                                            checked="@IsPreTarget(other)"
+                                            @onchange="e => SetPreTarget(other, e)" /> @other</label>
+                                    }
+                                </div>
+                            }
+                            <div class="form-grid">
+                                <label>Pre targets
+                                    <select @bind="_form.PreRouteMode">
+                                        <option value="@PreRouteMode.Only">Only to the ticked sites</option>
+                                        <option value="@PreRouteMode.First">Ticked sites first, then the rest</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <div class="checks cards-checks">
+                                <label><input type="checkbox" @bind="_form.NoPrecreateDir" /> Never create the release dir at race start on this site</label>
+                            </div>
+                            <p class="hint">Settings has "Create release dir at race start" (makes the dir on every target as soon as a race is announced). Tick this for sites that nuke empty dirs.</p>
                         </section>
 
                         <section class="panel-card">
@@ -342,23 +389,9 @@
                                 Add pattern
                             </button>
                         </PanelHeader>
-                        <p class="hint">Plain text matches anywhere in the name or path. Use * and ? for wildcard patterns.</p>
-                        <div class="list-grid list-head">
-                            <span>Pattern</span>
-                            <span></span>
-                        </div>
-                        @if (_form.Skiplist.Count == 0)
-                        {
-                            <div class="empty-row compact">No skip patterns configured</div>
-                        }
-                        @for (var i = 0; i < _form.Skiplist.Count; i++)
-                        {
-                            var index = i;
-                            <div class="list-grid">
-                                <input placeholder="sample or *incomplete*" @bind="_form.Skiplist[index]" />
-                                <button class="secondary icon-btn danger" title="Remove pattern" @onclick="() => RemoveSkipPattern(index)">×</button>
-                            </div>
-                        }
+                        <p class="hint">Evaluated after the global skiplist, top to bottom, first match wins. Same columns as the global skiplist:
+                            Regex, File / Dir, and Deny / Allow / Unique.</p>
+                        <SkiplistEditor Entries="_form.Skiplist" Placeholder="sample or *incomplete*" />
                     </section>
                 }
 
@@ -469,7 +502,7 @@
             MaxIdleSeconds = site.MaxIdleSeconds, TimeoutSeconds = site.TimeoutSeconds, AllowUpload = site.AllowUpload, AllowDownload = site.AllowDownload,
             CompleteMarkers = new List<string>(site.CompleteMarkers.Count > 0 ? site.CompleteMarkers : Site.DefaultCompleteMarkers()),
             Affils = new List<string>(site.Affils),
-            Skiplist = new List<string>(site.Skiplist),
+            Skiplist = site.Skiplist.Select(e => e.Clone()).ToList(),
             Sections = site.Sections.Select(x => new SiteSection { Name = x.Name, Section = x.Section }).ToList(),
             // Carry EVERY field through the form so Save never wipes settings that have
             // no input on this page (racing blocks, slow-skip, TLS orientation, and the
@@ -479,6 +512,9 @@
             TransferSourcePolicy = site.TransferSourcePolicy, TransferTargetPolicy = site.TransferTargetPolicy,
             ExceptSourceSites = new List<string>(site.ExceptSourceSites),
             ExceptTargetSites = new List<string>(site.ExceptTargetSites),
+            PreTargetSites = new List<string>(site.PreTargetSites), PreRouteMode = site.PreRouteMode,
+            NoPrecreateDir = site.NoPrecreateDir,
+            Priority = site.Priority, ListFrequency = site.ListFrequency,
         };
     }
 
@@ -564,6 +600,14 @@
 
     private bool IsSourceBlocked(string other) => !_form.IsAllowedSourceSite(other);
 
+    private bool IsPreTarget(string other) => _form.PreTargetSites.Contains(other, StringComparer.OrdinalIgnoreCase);
+
+    private void SetPreTarget(string other, ChangeEventArgs e)
+    {
+        _form.PreTargetSites.RemoveAll(x => x.Equals(other, StringComparison.OrdinalIgnoreCase));
+        if (e.Value is bool b && b) _form.PreTargetSites.Add(other);
+    }
+
     private void SetTargetBlocked(string other, ChangeEventArgs e)
         => ApplyBlocked(_form.ExceptTargetSites, _form.TransferTargetPolicy, other, e.Value is bool b && b);
 
@@ -582,7 +626,7 @@
     private void AddSection() => _form.Sections.Add(new SiteSection());
     private void AddAffil() => _form.Affils.Add("");
     private void AddCompleteMarker() => _form.CompleteMarkers.Add("COMPLETE");
-    private void AddSkipPattern() => _form.Skiplist.Add("*incomplete*");
+    private void AddSkipPattern() => _form.Skiplist.Add(new SkiplistEntry { Pattern = "*incomplete*" });
 
     private void RemoveAffil(int index)
     {
@@ -611,7 +655,7 @@
         _form.Password = _password;
         _form.CompleteMarkers = NormalizeList(_form.CompleteMarkers);
         _form.Affils = NormalizeList(_form.Affils);
-        _form.Skiplist = NormalizeList(_form.Skiplist);
+        _form.Skiplist = SkiplistEntry.NormalizeList(_form.Skiplist);
         try
         {
             var saved = _editing is null ? Engine.AddSite(_form) : Engine.SaveSite(_editing, _form);

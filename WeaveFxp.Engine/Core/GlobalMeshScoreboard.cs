@@ -46,6 +46,9 @@ internal sealed class GlobalMeshScoreboard<T>
     }
 
     private readonly object _sync = new();
+    private readonly Random _random;
+
+    public GlobalMeshScoreboard(Random? random = null) => _random = random ?? Random.Shared;
     private readonly Dictionary<string, Registration> _owners = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _activeDestinations = new(StringComparer.OrdinalIgnoreCase);
     private long _sequence;
@@ -63,6 +66,19 @@ internal sealed class GlobalMeshScoreboard<T>
     public void Publish(Registration owner, IEnumerable<Candidate> candidates)
     {
         var ordered = candidates.OrderByDescending(x => x.Score).ToList();
+        // cbftp ScoreBoard::shuffleEquals: peers should not all contest the same
+        // first archive. Shuffle only exact ties; scores and route gates still win.
+        for (var start = 0; start < ordered.Count;)
+        {
+            var end = start + 1;
+            while (end < ordered.Count && ordered[end].Score == ordered[start].Score) end++;
+            for (var i = start; i < end - 1; i++)
+            {
+                var next = _random.Next(i, end);
+                (ordered[i], ordered[next]) = (ordered[next], ordered[i]);
+            }
+            start = end;
+        }
         lock (_sync)
             if (IsCurrent(owner)) owner.Candidates = ordered;
     }

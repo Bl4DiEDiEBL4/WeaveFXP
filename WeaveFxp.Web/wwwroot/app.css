@@ -1342,16 +1342,20 @@ label {
 table.races-table {
   table-layout: fixed;
   width: 100%;
-  min-width: 1500px;
+  min-width: 1000px;
+  font-size: 12px;
 }
-.races-table .race-col-time { width: 168px; }
-.races-table .race-col-state { width: 112px; }
-.races-table .race-col-runtime { width: 82px; }
-.races-table .race-col-release { width: 29%; }
-.races-table .race-col-route { width: 170px; }
-.races-table .race-col-section { width: 150px; }
-.races-table .race-col-progress { width: 31%; }
-.races-table .race-col-actions { width: 166px; }
+.races-table .race-col-time { width: 144px; }
+.races-table .race-col-state { width: 96px; }
+.races-table .race-col-runtime { width: 76px; }
+.races-table .race-col-release { width: 30%; }
+.races-table .race-col-route { width: 96px; }
+.races-table .race-col-section { width: 112px; }
+.races-table .race-col-actions { width: 204px; }
+.races-table > tbody > .race-row > td { padding: 6px 8px; }
+.races-table > thead th { padding: 8px; font-size: 10px; }
+.races-table .race-row .mono { font-size: 11px; }
+.races-table .race-row .pill { font-size: 11px; min-height: 20px; padding: 1px 7px; }
 .races-table th,
 .races-table > tbody > tr > td {
   overflow: hidden;
@@ -1363,26 +1367,29 @@ table.races-table {
 .races-table .race-name {
   width: auto;
   overflow: hidden;
-  text-overflow: clip;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 700;
 }
 .races-table .col-progress {
-  overflow: visible;
-  white-space: nowrap;
+  overflow: hidden;
+  white-space: normal;
 }
 .races-table .job-prog-text {
-  overflow: visible;
+  overflow: hidden;
   min-width: 0;
-  max-width: none;
+  max-width: 100%;
   flex: 1 1 auto;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 10.5px;
   line-height: 1.35;
 }
 .races-table .col-actions { text-align: right; white-space: nowrap; }
-.races-table .col-actions button { margin-left: 6px; min-height: 28px; padding: 0 9px; }
-.races-table .job-prog.wide { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
-.races-table .job-prog.wide .job-bar { flex: 0 0 140px; }
-.races-table .race-log-row td { padding: 0; white-space: normal; overflow: visible; }
+.races-table .col-actions button { margin-left: 4px; min-height: 26px; padding: 0 7px; font-size: 11px; }
+.races-table .job-prog.wide { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: center; gap: 6px; width: 100%; min-width: 0; }
+.races-table .job-prog.wide .job-bar { min-width: 0; width: 100%; height: 6px; }
+.races-table .race-log-row > td { padding: 0; white-space: normal; overflow: visible; }
 .races-table .pill + .pill { margin-left: 6px; }
 
 .race-mesh-summary {
@@ -1421,20 +1428,19 @@ table.races-table {
 .race-route-chip strong { color: var(--cyan); }
 .race-route-chip span { color: var(--muted); font-size: 11px; }
 
+@media (max-width: 1550px) {
+  .races-table .race-col-time { width: 136px; }
+  .races-table .race-col-state { width: 88px; }
+  .races-table .race-col-runtime { width: 72px; }
+  .races-table .race-col-release { width: 25%; }
+  .races-table .race-col-route { width: 80px; }
+  .races-table .race-col-section { width: 90px; }
+  .races-table .race-col-actions { width: 204px; }
+  .races-table .job-prog.wide { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .races-table .job-prog.wide .job-bar { max-width: 100px; }
+}
+
 @media (max-width: 1200px) {
-  .races-table .race-col-time { width: 158px; }
-  .races-table .race-col-runtime { width: 74px; }
-  .races-table .race-col-release { width: 28%; }
-  .races-table .race-col-progress { width: 30%; }
-  .races-table .race-col-route { width: 104px; }
-  .races-table .race-col-section { width: 120px; }
-  .races-table .race-col-actions { width: 146px; }
-  .races-table .job-prog.wide .job-bar { flex-basis: 100px; }
-  .races-table .job-prog-text {
-    white-space: normal;
-    overflow-wrap: break-word;
-  }
-  .races-table .col-actions button { padding: 0 7px; }
   .race-mesh-summary { flex-direction: column; gap: 8px; }
 }
 
@@ -2516,8 +2522,68 @@ table.races-table {
   background: linear-gradient(180deg, #171e2a, #141a24);
 }
 
+/* Keep room for the footer Save button at narrower desktop widths too. */
+.settings-page .panel-card {
+  padding-bottom: 72px;
+}
+
 .panel-card.full {
   max-width: none;
+}
+
+.settings-page .settings-shell { container-type: inline-size; }
+.settings-page .settings-overview { margin: 0; }
+/* All settings cards share the same tracks: one unit, or two units plus the gap. */
+.settings-page .settings-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; align-items: stretch; }
+.settings-general-grid { grid-template-areas: "web engine engine updates" "notifications notifications data maintenance"; }
+.settings-connection-grid { grid-template-areas: "network active proxy proxy"; }
+.settings-transfers-grid { grid-template-areas: "racing racing jobs tcp" "racing racing behavior behavior" "skiplist skiplist local local" "order order sites sites"; grid-template-rows: repeat(2, 1fr) auto auto; }
+.settings-pair-grid > .panel-card { grid-column: span 2; }
+.settings-web-card { grid-area: web; }
+.settings-engine-card { grid-area: engine; }
+.settings-updates-card { grid-area: updates; }
+.settings-notifications-card { grid-area: notifications; }
+.settings-data-card { grid-area: data; }
+.settings-maintenance-card { grid-area: maintenance; }
+.settings-network-card { grid-area: network; }
+.settings-active-card { grid-area: active; }
+.settings-proxy-card { grid-area: proxy; }
+.settings-racing-card { grid-area: racing; }
+.settings-jobs-card { grid-area: jobs; }
+.settings-tcp-card { grid-area: tcp; }
+.settings-behavior-card { grid-area: behavior; }
+.settings-skiplist-card { grid-area: skiplist; }
+.settings-local-card { grid-area: local; }
+.settings-order-card { grid-area: order; }
+.settings-sites-card { grid-area: sites; }
+.settings-page .panel-head { flex-wrap: wrap; align-items: center; }
+.settings-page .panel-head h3 { margin: 0; }
+.settings-page .panel-head-actions { width: auto; flex-direction: row; }
+.settings-page .panel-card > .hint,
+.settings-page .panel-card > .fh { margin: 0; }
+.settings-help { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.settings-help summary { width: fit-content; cursor: pointer; }
+.settings-help p { margin: 10px 0 0; max-width: 95ch; }
+@container (max-width: 1250px) {
+  .settings-page .settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .settings-general-grid { grid-template-areas: "web engine engine" "updates notifications notifications" "data maintenance maintenance"; }
+  .settings-connection-grid { grid-template-areas: "network proxy proxy" "active proxy proxy"; }
+  .settings-connection-grid { grid-template-rows: repeat(2, 1fr); }
+  .settings-transfers-grid { grid-template-areas: "racing racing jobs" "racing racing tcp" "racing racing behavior" "skiplist skiplist local" "order order sites"; grid-template-rows: repeat(3, 1fr) auto auto; }
+  .settings-pair-grid > .panel-card:nth-child(2) { grid-column: span 1; }
+}
+@container (max-width: 1000px) {
+  .settings-page .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-general-grid { grid-template-areas: "web engine" "updates notifications" "data maintenance"; }
+  .settings-connection-grid { grid-template-areas: "network active" "proxy proxy"; grid-template-rows: none; }
+  .settings-transfers-grid { grid-template-areas: "racing racing" "jobs tcp" "behavior behavior" "skiplist skiplist" "local local" "order order" "sites sites"; grid-template-rows: none; }
+  .settings-pair-grid > .panel-card { grid-column: span 1; }
+}
+@container (max-width: 640px) {
+  .settings-page .settings-grid { grid-template-columns: minmax(0, 1fr); }
+  .settings-general-grid { grid-template-areas: "web" "engine" "updates" "notifications" "data" "maintenance"; }
+  .settings-connection-grid { grid-template-areas: "network" "active" "proxy"; }
+  .settings-transfers-grid { grid-template-areas: "racing" "jobs" "tcp" "behavior" "skiplist" "local" "order" "sites"; }
 }
 
 .proxy-card {
@@ -3048,6 +3114,38 @@ table.races-table {
 
 .confirm-modal {
   width: min(520px, calc(100vw - 32px));
+}
+
+.nuke-modal { width: min(680px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); }
+.nuke-modal h3 { margin: 0; overflow-wrap: anywhere; }
+.nuke-body { display: grid; gap: 16px; padding: 16px; }
+.nuke-context, .nuke-fields { display: grid; grid-template-columns: minmax(0, 1fr) 120px; gap: 12px; }
+.nuke-context { grid-template-columns: 120px minmax(0, 1fr); }
+.nuke-modal label { min-width: 0; font-size: 12px; }
+.nuke-modal input, .nuke-modal select { min-width: 0; width: 100%; }
+.nuke-modal input[readonly] { color: var(--muted); }
+.nuke-selection, .wfx-nuke-quick { display: grid; gap: 8px; min-width: 0; }
+.nuke-selection-label { display: flex; align-items: center; gap: 8px; }
+.nuke-selection-label, .nuke-field-label { color: var(--muted); font-size: 12px; font-weight: 750; }
+.nuke-count { padding: 1px 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 11px; }
+.nuke-modal .wfx-nuke-items {
+  max-height: 140px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--field);
+}
+.wfx-nuke-items li { padding: 9px 12px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.wfx-nuke-items li + li { border-top: 1px solid var(--line-soft); }
+.nuke-quick-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.nuke-modal .modal-actions { justify-content: flex-end; }
+.nuke-results { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 520px) {
+  .nuke-context, .nuke-fields { grid-template-columns: minmax(0, 1fr); }
+  .nuke-fields input[type="number"] { max-width: 120px; }
 }
 
 .confirm-body {
@@ -4096,3 +4194,19 @@ html[data-palette="daylight"] .toast {
 html[data-palette="daylight"] .palette-swatch {
   border-color: rgba(24, 37, 56, 0.25);
 }
+.races-page .table-wrap { container-type: inline-size; }
+.race-files-scroll { overflow-x: auto; width: 100cqi; max-width: 100%; }
+.file-table.race-unified-files { width: 100%; min-width: 1000px; }
+.race-unified-files .file-col-started { width: 82px; }
+.race-unified-files .file-col-use { width: 58px; }
+.race-unified-files .file-col-route { width: 100px; }
+.race-unified-files .file-col-transferred { width: 155px; }
+.race-unified-files .file-col-name { width: auto; }
+.race-unified-files .file-col-left { width: 52px; }
+.race-unified-files .file-col-speed { width: 94px; }
+.race-unified-files .file-col-done { width: 100px; }
+.race-unified-files .file-col-own { width: 90px; }
+.race-unified-files th { white-space: normal; }
+.race-unified-files td { overflow: hidden; text-overflow: ellipsis; }
+.race-unified-files .pill { margin: 0; padding: 2px 8px; }
+.race-unified-files .file-active { background: rgba(31, 196, 169, 0.08); }

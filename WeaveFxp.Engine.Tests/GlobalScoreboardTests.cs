@@ -74,6 +74,14 @@ internal static class GlobalScoreboardTests
         check(fair.TryTake(a) is null, "equal-score races rotate rather than letting the fastest worker monopolize slots");
         using (var second = fair.TryTake(b)) check(second is not null, "waiting equal-score race gets next slot");
 
+        var tied = new GlobalMeshScoreboard<string>(new LastChoiceRandom());
+        using var tiedOwner = tied.Register("ties", 1, () => { });
+        tied.Publish(tiedOwner, new[] { Candidate("a", 10), Candidate("b", 10), Candidate("c", 10), Candidate("priority-sfv", 100) });
+        using (var priority = tied.TryTake(tiedOwner))
+            check(priority?.Candidate.Value == "priority-sfv", "tie shuffling never displaces higher-priority SFV work");
+        using (var shuffled = tied.TryTake(tiedOwner))
+            check(shuffled?.Candidate.Value == "c", "equal-priority payloads are spread across files instead of fixed first-file collisions");
+
         var concurrent = new GlobalMeshScoreboard<string>();
         using var owner = concurrent.Register("parallel", 8, () => { });
         concurrent.Publish(owner, Enumerable.Range(0, 8).Select(i => Candidate("route-" + i, i, key: "same-file")));
@@ -82,6 +90,11 @@ internal static class GlobalScoreboardTests
         check(claims.Count == 1, "parallel workers cannot claim duplicate destination reservations");
         foreach (var claim in claims) { claim.Dispose(); claim.Dispose(); }
         check(reservations == 0, "claim disposal is idempotent");
+    }
+
+    private sealed class LastChoiceRandom : Random
+    {
+        public override int Next(int minValue, int maxValue) => maxValue - 1;
     }
 
     private sealed class Cleanup(Action release) : IDisposable

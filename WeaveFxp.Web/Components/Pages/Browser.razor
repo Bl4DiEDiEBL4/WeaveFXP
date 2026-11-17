@@ -313,7 +313,7 @@
                     <button @onclick="() => OpenCommandShell(ChmodCommand())">Chmod 755…</button>
                     @if (entry.Type == "dir")
                     {
-                        <button @onclick="() => OpenCommandShell(NukeCommand())">Nuke…</button>
+                        <button class="danger" @onclick="OpenNuke">@NukeMenuLabel()</button>
                     }
                 }
             }
@@ -376,6 +376,69 @@
         <div class="modal-actions">
             <button class="secondary" @onclick="CloseClearLogsConfirm">Cancel</button>
             <button class="danger" @onclick="ClearBrowserLogs">Clear all logs</button>
+        </div>
+    </section>
+}
+
+@if (_nukeOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseNuke"></div>
+    <section class="modal nuke-modal" role="dialog" aria-modal="true" aria-labelledby="nuke-title">
+        <header>
+            <h3 id="nuke-title">Nuke @(_nukeItems.Count == 1 ? "1 dir" : $"{_nukeItems.Count} dirs") on @_nukeSite</h3>
+            <button type="button" class="secondary icon-btn" title="Close" disabled="@_nukeBusy" @onclick="CloseNuke">×</button>
+        </header>
+        <div class="nuke-body">
+            <div class="nuke-context">
+                <label>Site<input readonly value="@_nukeSite" /></label>
+                <label>Path<input readonly value="@_nukePath" title="@_nukePath" /></label>
+            </div>
+            <div class="nuke-selection">
+                <div class="nuke-selection-label" id="nuke-selection-label">
+                    <span>Selected directories</span>
+                    <span class="nuke-count">@_nukeNames.Count</span>
+                </div>
+                <ul class="wfx-nuke-items" aria-labelledby="nuke-selection-label">
+                    @foreach (var name in _nukeNames)
+                    {
+                        <li>@name</li>
+                    }
+                </ul>
+            </div>
+            <div class="nuke-fields">
+                <label>Reason<input @bind="_nukeReason" @bind:event="oninput" placeholder="e.g. dupe.Other.Release-GRP" /></label>
+                <label>Multiplier<input type="number" min="0" max="100" @bind="_nukeMultiplier" /></label>
+            </div>
+            <div class="wfx-nuke-quick">
+                <span class="nuke-field-label">Quick reason</span>
+                <div class="nuke-quick-buttons">
+                    <button type="button" class="secondary slim" @onclick='() => SetNukeReason("proper")'>Proper</button>
+                    <button type="button" class="secondary slim" @onclick='() => SetNukeReason("repack")'>Repack</button>
+                    <button type="button" class="secondary slim" @onclick='() => SetNukeReason("incomplete")'>Incomplete</button>
+                    <button type="button" class="secondary slim" @onclick='() => StartDupeReason("dupe")'>Dupe…</button>
+                    <button type="button" class="secondary slim" @onclick='() => StartDupeReason("dupe.web")'>Dupe web…</button>
+                </div>
+            </div>
+            @if (_nukeDupePrefix is not null)
+            {
+                <label>Dupe of
+                    <select @onchange="PickDupeRelease">
+                        <option value="">pick the release it dupes (@_nukeDupeChoices.Count in this dir)</option>
+                        @foreach (var rel in _nukeDupeChoices)
+                        {
+                            <option value="@rel">@rel</option>
+                        }
+                    </select>
+                </label>
+            }
+            @if (_nukeResults is not null)
+            {
+                <pre class="console nuke-results">@NukeResultText()</pre>
+            }
+        </div>
+        <div class="modal-actions">
+            <button type="button" class="secondary" disabled="@_nukeBusy" @onclick="CloseNuke">@(_nukeResults is null ? "Cancel" : "Close")</button>
+            <button type="button" class="danger" disabled="@(!CanNuke)" @onclick="ExecuteNuke">@(_nukeBusy ? "Nuking…" : $"☢ Nuke {_nukeItems.Count}")</button>
         </div>
     </section>
 }
@@ -476,6 +539,18 @@
     private string _shellLogAlias = "";
     private string _shellCommand = "";
     private string _shellResult = "";
+    private bool _nukeOpen;
+    private bool _nukeBusy;
+    private PaneModel? _nukePane;
+    private string _nukeSite = "";
+    private string _nukePath = "";
+    private List<string> _nukeItems = new();
+    private List<string> _nukeNames = new();
+    private List<string> _nukeDupeChoices = new();
+    private string _nukeReason = "";
+    private int _nukeMultiplier = 1;
+    private string? _nukeDupePrefix;
+    private List<NukeResult>? _nukeResults;
     private bool _viewerOpen;
     private bool _viewerLoading;
     private bool _viewerIsImage;
@@ -501,7 +576,7 @@
     {
         _sites = Engine.Sites(true);
         _favorites = Engine.Settings(true).BrowserFavorites;
-        _jobs = Engine.Jobs();
+        _jobs = Engine.JobsForUi(includeManualEvents: true);
         foreach (var job in _jobs.Where(j => j.Terminal))
             _terminalJobsSeen.Add(job.Id);
         Engine.Changed += OnEngineChanged;
@@ -556,7 +631,7 @@
         _ = InvokeAsync(async () =>
         {
             Interlocked.Exchange(ref _engineRefreshQueued, 0);
-            var jobs = Engine.Jobs();
+            var jobs = Engine.JobsForUi(includeManualEvents: true);
             _jobs = jobs;
             var terminal = _jobs.Where(j => j.Terminal && _terminalJobsSeen.Add(j.Id)).ToList();
             var runningDownloads = _jobs
@@ -1928,7 +2003,7 @@
     private void RemoveAllQueueJobs()
     {
         var removed = Engine.RemoveManualJobs(_removeAllIds);
-        _jobs = Engine.Jobs();
+        _jobs = Engine.JobsForUi(includeManualEvents: true);
         CloseRemoveAllConfirm();
         Toast($"Removed {removed} manual job(s)");
     }
@@ -1965,11 +2040,98 @@
         return "SITE CHMOD 755 " + path;
     }
 
-    private string NukeCommand()
+    // ---- Nuke (cbftp nuke screen): selected dirs, reason, multiplier, quick reasons ----
+    private List<RemoteEntry> SelectedDirs(PaneModel pane) => pane.Selected
+        .Where(i => i >= 0 && i < pane.Entries.Count)
+        .OrderBy(i => i)
+        .Select(i => pane.Entries[i])
+        .Where(e => e.Type == "dir")
+        .ToList();
+
+    private string NukeMenuLabel()
     {
-        var entry = ContextEntry();
-        return "SITE NUKE " + (entry?.Name ?? "");
+        var count = _contextPane is null ? 0 : SelectedDirs(_contextPane).Count;
+        return count > 1 ? $"Nuke {count} dirs…" : "Nuke…";
     }
+
+    private void OpenNuke()
+    {
+        var pane = _contextPane;
+        HideContext();
+        if (pane is null || IsLocalPane(pane)) return;
+        var dirs = SelectedDirs(pane);
+        if (dirs.Count == 0) return;
+        _nukePane = pane;
+        _nukeSite = pane.Site;
+        _nukePath = pane.Path;
+        _nukeItems = dirs.Select(d => EntryPath(pane, d)).ToList();
+        _nukeNames = dirs.Select(d => d.Name).ToList();
+        _nukeDupeChoices = pane.Entries
+            .Where(e => e.Type == "dir" && !_nukeNames.Contains(e.Name, StringComparer.OrdinalIgnoreCase) &&
+                        !e.Name.StartsWith("[NUKED]", StringComparison.OrdinalIgnoreCase))
+            .Select(e => e.Name)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        _nukeReason = "";
+        _nukeMultiplier = 1;
+        _nukeDupePrefix = null;
+        _nukeResults = null;
+        _nukeBusy = false;
+        _nukeOpen = true;
+    }
+
+    private void CloseNuke()
+    {
+        if (!_nukeBusy) _nukeOpen = false;
+    }
+
+    private void SetNukeReason(string reason)
+    {
+        _nukeReason = reason;
+        _nukeDupePrefix = null;
+    }
+
+    private void StartDupeReason(string prefix)
+    {
+        _nukeDupePrefix = prefix;
+        _nukeReason = prefix;
+    }
+
+    private void PickDupeRelease(ChangeEventArgs e)
+    {
+        var release = e.Value?.ToString() ?? "";
+        if (_nukeDupePrefix is not null && release.Length > 0)
+            _nukeReason = _nukeDupePrefix + "." + release;
+    }
+
+    private bool CanNuke => !_nukeBusy && _nukeResults is null && _nukeItems.Count > 0 &&
+        !string.IsNullOrWhiteSpace(_nukeReason) && _nukeMultiplier is >= 0 and <= 100;
+
+    private async Task ExecuteNuke()
+    {
+        if (!CanNuke || _nukePane is null) return;
+        _nukeBusy = true;
+        try
+        {
+            _nukeResults = await Engine.NukeAsync(_nukeSite, _nukeItems, _nukeMultiplier, _nukeReason.Trim());
+            var ok = _nukeResults.Count(r => r.Ok);
+            Toast(ok == _nukeItems.Count
+                ? $"Nuked {ok} dir(s) on {_nukeSite}"
+                : $"Nuked {ok} of {_nukeItems.Count} dir(s) on {_nukeSite}");
+            await ListPane(_nukePane, true);
+        }
+        catch (Exception ex)
+        {
+            _nukeResults = new() { new NukeResult { Message = ex.Message } };
+        }
+        finally
+        {
+            _nukeBusy = false;
+        }
+    }
+
+    private string NukeResultText() => string.Join("\n", (_nukeResults ?? new()).Select(r =>
+        $"{(r.Ok ? "OK    " : "FAILED")} {(r.Path.Length == 0 ? "" : r.Path[(r.Path.LastIndexOf('/') + 1)..])}  {r.Code} {r.Message}".TrimEnd()));
 
     private string RemoveDirCommand()
     {

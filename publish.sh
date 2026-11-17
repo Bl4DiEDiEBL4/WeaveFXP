@@ -1,126 +1,76 @@
 #!/usr/bin/env bash
-# ============================================================================
-#  WeaveFXP - produce shippable single-exe builds and release zips.
-#
-#  Result:  Release/linux-x64/WeaveFXP
-#           Release/linux-arm64/WeaveFXP
-#           Release/win-x64/WeaveFXP.exe
-#           Release/zips/WeaveFXP-v<version>-<runtime>.zip
-# ============================================================================
+# Build every requested runtime in staging before replacing release artifacts.
 set -euo pipefail
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 OUT="$ROOT/Release"
-ZIPOUT="$OUT/zips"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/weavefxp-publish.XXXXXX")"
 PROJ="$ROOT/WeaveFxp.Web/WeaveFxp.Web.csproj"
-VERSION="1.0.3"
-LEGACY_DATA="$OUT/data"
-LEGACY_DATA_SEED="$WORK/legacy-data"
+RIDS=("$@")
+if [ ${#RIDS[@]} -eq 0 ]; then RIDS=(linux-x64 linux-arm64 win-x64); fi
 
+for RID in "${RIDS[@]}"; do
+    case "$RID" in win-x64|linux-x64|linux-arm64) ;; *) echo "Unsupported runtime: $RID" >&2; exit 1 ;; esac
+    if [ -L "$OUT" ] || [ -L "$OUT/$RID" ] || [ -L "$OUT/zips" ]; then
+        echo "Refusing a linked release path" >&2; exit 1
+    fi
+done
+command -v dotnet >/dev/null || { echo "dotnet SDK is required" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "python3 is required for versioning and release packages" >&2; exit 1; }
+VERSION="$(python3 - "$PROJ" <<'PY'
+import sys, xml.etree.ElementTree as ET
+version = ET.parse(sys.argv[1]).getroot().findtext("./PropertyGroup/Version")
+if not version or any(c not in "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-+" for c in version):
+    raise SystemExit("Invalid project version")
+print(version)
+PY
+)"
+TEMP_ROOT="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+WORK="$(mktemp -d "$TEMP_ROOT/weavefxp-publish.XXXXXX")"
 cleanup() {
-    rm -rf "$WORK"
+    case "$WORK" in "$TEMP_ROOT"/weavefxp-publish.*) rm -rf -- "$WORK" ;; *) echo "Unsafe staging path" >&2; return 1 ;; esac
 }
 trap cleanup EXIT
 
-if ! command -v dotnet >/dev/null 2>&1; then
-    echo "dotnet SDK not found. Install the .NET 8 SDK:" >&2
-    echo "  https://dotnet.microsoft.com/download/dotnet/8.0" >&2
-    exit 1
-fi
-
-if command -v python3 >/dev/null 2>&1; then
-    VERSION="$(python3 - "$PROJ" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-root = ET.parse(sys.argv[1]).getroot()
-print(root.findtext("./PropertyGroup/Version") or "1.0.3")
-PY
-)"
-fi
-
-mkdir -p "$OUT" "$ZIPOUT"
-
-# Older builds stored data directly in Release/data while the single-exe runtime
-# stores it next to the executable in Release/<runtime>/data. Preserve that legacy
-# folder as a seed so publishing never makes an existing setup look empty.
-if [ -d "$LEGACY_DATA" ]; then
-    rm -rf "$LEGACY_DATA_SEED"
-    cp -a "$LEGACY_DATA" "$LEGACY_DATA_SEED"
-fi
-
-find "$OUT" -maxdepth 1 -type f -delete
-
-RIDS=("$@")
-if [ ${#RIDS[@]} -eq 0 ]; then
-    RIDS=(linux-x64 linux-arm64 win-x64)
-fi
-
-echo "=== Restoring ==="
-dotnet restore "$PROJ"
-
+dotnet restore "$PROJ" --disable-parallel
 for RID in "${RIDS[@]}"; do
-    echo
-    echo "=== Publishing $RID ==="
-
-    PRESERVE_DATA="$WORK/data-$RID"
-    rm -rf "$PRESERVE_DATA"
-    if [ -d "$OUT/$RID/data" ]; then
-        mv "$OUT/$RID/data" "$PRESERVE_DATA"
-    elif [ -d "$LEGACY_DATA_SEED" ]; then
-        cp -a "$LEGACY_DATA_SEED" "$PRESERVE_DATA"
-    fi
-
-    rm -rf "$OUT/$RID"
-    rm -rf "$WORK/bin/$RID"
-
-    dotnet publish "$PROJ" \
-        -c Release \
-        -r "$RID" \
-        --self-contained true \
-        -p:BaseOutputPath="$WORK/bin/$RID/" \
-        -p:PublishSingleFile=true \
-        -p:IncludeAllContentForSelfExtract=true \
-        -p:EnableCompressionInSingleFile=true \
-        -p:PublishTrimmed=false \
-        -p:DebugType=none \
-        -o "$OUT/$RID"
-
-    rm -f "$OUT/$RID"/*.pdb
-    rm -f "$OUT/$RID"/appsettings*.json
-    rm -f "$OUT/$RID"/*.staticwebassets*.json
-    rm -f "$OUT/$RID"/web.config
-    rm -rf "$OUT/$RID/wwwroot"
-    rm -rf "$OUT/$RID/bin"
-    [ -f "$OUT/$RID/WeaveFXP" ] && chmod +x "$OUT/$RID/WeaveFXP"
-    [ -d "$PRESERVE_DATA" ] && mv "$PRESERVE_DATA" "$OUT/$RID/data"
-
-    ZIP="$ZIPOUT/WeaveFXP-v$VERSION-$RID.zip"
-    rm -f "$ZIP"
-    if command -v zip >/dev/null 2>&1; then
-        (cd "$OUT/$RID" && zip -q -9 "$ZIP" WeaveFXP*)
-    elif command -v python3 >/dev/null 2>&1; then
-        python3 - "$OUT/$RID" "$ZIP" <<'PY'
-import pathlib
-import sys
-import zipfile
-root = pathlib.Path(sys.argv[1])
-zip_path = pathlib.Path(sys.argv[2])
-with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-    for path in root.glob("WeaveFXP*"):
-        if path.is_file():
-            zf.write(path, path.name)
+    STAGE="$WORK/$RID"
+    NAME=WeaveFXP
+    [ "$RID" != win-x64 ] || NAME=WeaveFXP.exe
+    dotnet publish "$PROJ" -c Release -r "$RID" --no-restore --self-contained true -m:1 -nr:false \
+        -p:BaseOutputPath="$WORK/bin/$RID/" -p:PublishSingleFile=true \
+        -p:IncludeAllContentForSelfExtract=true -p:EnableCompressionInSingleFile=true \
+        -p:PublishTrimmed=false -p:DebugType=none -o "$STAGE"
+    test -f "$STAGE/$NAME"
+    [ "$RID" = win-x64 ] || chmod +x "$STAGE/$NAME"
+    python3 - "$STAGE" "$NAME" "$WORK/WeaveFXP-v$VERSION-$RID.zip" <<'PY'
+import pathlib, sys, zipfile
+root, binary, output = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+    zf.write(root / binary, binary)
 PY
-    else
-        echo "zip or python3 is required to package $RID" >&2
-        exit 1
-    fi
 done
 
-echo
-echo "=== Done ==="
-ls -lh "$OUT"/*/WeaveFXP* "$ZIPOUT"/WeaveFXP-v"$VERSION"-*.zip 2>/dev/null || true
-echo
-echo "  Ship only the per-platform zip."
-echo "  data/ is created on first run next to the executable."
-echo "  Legacy Release/data is copied into runtime folders when no runtime data exists yet."
+# Runtime data is never moved into temporary staging, even on a failed build.
+for RID in "${RIDS[@]}"; do
+    DEST="$OUT/$RID"
+    NAME=WeaveFXP
+    [ "$RID" != win-x64 ] || NAME=WeaveFXP.exe
+    if [ -L "$OUT" ] || [ -L "$DEST" ] || [ -L "$OUT/zips" ]; then
+        echo "Refusing a linked release path" >&2; exit 1
+    fi
+    mkdir -p "$DEST" "$OUT/zips"
+    for NAME_TO_COPY in "$NAME"; do
+        cp "$WORK/$RID/$NAME_TO_COPY" "$DEST/.$NAME_TO_COPY.incoming-$$"
+        mv -f -- "$DEST/.$NAME_TO_COPY.incoming-$$" "$DEST/$NAME_TO_COPY"
+    done
+    for GENERATED in "$DEST"/*.pdb "$DEST"/appsettings*.json "$DEST"/*.staticwebassets*.json "$DEST/web.config" "$DEST/wwwroot" "$DEST/bin" "$DEST/THIRD-PARTY-NOTICES.txt"; do
+        case "$GENERATED" in "$OUT/$RID/"*) ;; *) echo "Unsafe generated path" >&2; exit 1 ;; esac
+        [ ! -L "$GENERATED" ] || { echo "Refusing linked generated files" >&2; exit 1; }
+        rm -rf -- "$GENERATED"
+    done
+    if [ ! -e "$DEST/data" ] && [ -d "$OUT/data" ]; then cp -a "$OUT/data" "$DEST/data"; fi
+    ZIP="WeaveFXP-v$VERSION-$RID.zip"
+    cp "$WORK/$ZIP" "$OUT/zips/.$ZIP.incoming-$$"
+    mv -f -- "$OUT/zips/.$ZIP.incoming-$$" "$OUT/zips/$ZIP"
+    echo "Ready: $DEST/$NAME"
+done
+echo "Release packages: $OUT/zips"

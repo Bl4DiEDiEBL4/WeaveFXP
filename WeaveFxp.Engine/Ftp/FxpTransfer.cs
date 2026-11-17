@@ -39,13 +39,14 @@ public static class FxpTransfer
             catch (Exception ex) { log("warn", ex.Message); }
         }
 
-        if (ShouldSkip(req.SourcePath, RemoteBase(req.SourcePath), MergeSkiplists(src, dst)))
+        var sourceIsDirectory = await IsRemoteDirAsync(src, req.SourcePath).ConfigureAwait(false);
+        if (ShouldSkip(req.SourcePath, RemoteBase(req.SourcePath), MergeSkiplists(src, dst), sourceIsDirectory))
         {
             log("info", $"skiplist skipped {req.SourcePath}");
             return;
         }
 
-        if (await IsRemoteDirAsync(src, req.SourcePath).ConfigureAwait(false))
+        if (sourceIsDirectory)
         {
             log("info", $"source {req.SourcePath} is a directory, transferring recursively");
             await TransferDirAsync(src, dst, dest, req.SourcePath, req.DestPath, MaxDepth, log, ct, onFilesFound, onFileDone).ConfigureAwait(false);
@@ -82,7 +83,7 @@ public static class FxpTransfer
                 log("info", $"skipped incomplete marker {entry.Name}");
                 continue;
             }
-            if (ShouldSkip(childSrc, entry.Name, skiplist))
+            if (ShouldSkip(childSrc, entry.Name, skiplist, isDir: entry.Type is "dir" or "link"))
             {
                 log("info", $"skiplist skipped {childSrc}");
                 continue;
@@ -167,6 +168,17 @@ public static class FxpTransfer
     }
 
     public static bool RequiresConnectionDrop(Exception ex) => ex is DirtyControlChannelException;
+
+    public static bool IsInsufficientStorageError(Exception ex)
+    {
+        var message = ex.Message ?? "";
+        if (Regex.IsMatch(message,
+            @"(?:^|:\s*)(?:452|552)\s|\bdisk full\b|\bno space left\b|\binsufficient (?:disk|storage) space\b|\bquota exceeded\b|\bbelow free_space_mb\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)) return true;
+        return ex is AggregateException aggregate
+            ? aggregate.InnerExceptions.Any(IsInsufficientStorageError)
+            : ex.InnerException is { } inner && IsInsufficientStorageError(inner);
+    }
 
     public static bool IsDestinationBusyError(Exception ex)
     {
@@ -300,9 +312,8 @@ public static class FxpTransfer
         {
 
         // Both transfer commands go on the wire back to back (passive side first),
-        // then we read both replies — the two round trips overlap instead of
-        // serializing. On a failure the surviving side gets ABORed and drained, so
-        // both pooled connections come back clean no matter what happened.
+        // then we read both replies. Preliminary failures leave the peer's reply
+        // unread, so the caller must discard both pooled connections.
         var passiveCmd = srcPassive ? retrieveCommand : storeCommand;
         var activeCmd = srcPassive ? storeCommand : retrieveCommand;
         await passiveClient.BeginStartCommandAsync(passiveCmd).ConfigureAwait(false);
@@ -335,10 +346,49 @@ public static class FxpTransfer
         var srcWait = src.WaitFinalAsync();
         var dstWait = dst.WaitFinalAsync();
         Exception? srcErr = null, dstErr = null;
-        try { await srcWait.ConfigureAwait(false); } catch (Exception ex) { srcErr = ex; }
-        try { await dstWait.ConfigureAwait(false); } catch (Exception ex) { dstErr = ex; }
+        var first = srcWait;
+        var second = dstWait;
+        Exception? firstError = null, secondError = null;
+        try
+        {
+            first = await Task.WhenAny(srcWait, dstWait).WaitAsync(ct).ConfigureAwait(false);
+            second = ReferenceEquals(first, srcWait) ? dstWait : srcWait;
+            try { await first.ConfigureAwait(false); } catch (Exception ex) { firstError = ex; }
+            // cbftp's MAX_WAIT_ERROR: a known peer failure must not occupy both
+            // slots until the normal (potentially very long) transfer timeout.
+            try
+            {
+                if (firstError is null) await second.WaitAsync(ct).ConfigureAwait(false);
+                else await second.WaitAsync(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                secondError = new IOException("peer final reply timed out after the other side failed");
+                src.Dispose(); dst.Dispose();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested) { secondError = ex; }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            src.Dispose(); dst.Dispose();
+            throw;
+        }
+        finally
+        {
+            // Disposing aborts pending reads, whose faults still need observation.
+            foreach (var pending in new[] { srcWait, dstWait })
+                _ = pending.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        }
+        if (ReferenceEquals(first, srcWait)) { srcErr = firstError; dstErr = secondError; }
+        else { dstErr = firstError; srcErr = secondError; }
 
-        var failure = srcErr ?? dstErr;
+        // A source abort must not erase destination occupancy. Keep the two errors
+        // separate: merging their messages can misclassify a dupe as source-busy.
+        if (srcErr is not null) log("warn", $"FXP source {srcPath}: {srcErr.Message}");
+        if (dstErr is not null) log("warn", $"FXP destination {dstPath}: {dstErr.Message}");
+        var destinationOccupied = dstErr is not null && (IsDestinationDupeError(dstErr) || IsDestinationBusyError(dstErr));
+        var failure = destinationOccupied ? dstErr : srcErr ?? dstErr;
         if (failure is not null)
         {
             // Wrong TLS orientation? Remember the opposite for this site pair so the
@@ -349,7 +399,10 @@ public static class FxpTransfer
                 RoleFlipLearned?.Invoke(pairKey, !flipped);
                 log("warn", $"TLS FXP handshake failed; making the {(srcIsTlsClient ? "destination" : "source")} the TLS client for {pairKey}");
             }
-            throw failure;
+            // Some servers send a trailing 226 after 426. Even a dupe handler must
+            // discard these channels instead of returning a late reply to the pool.
+            var side = ReferenceEquals(failure, dstErr) ? "destination" : "source";
+            throw new DirtyControlChannelException(new IOException($"FXP {side}: {failure.Message}", failure));
         }
         log("info", $"completed {dstPath} ({sw.ElapsedMilliseconds}ms)");
 
@@ -419,16 +472,10 @@ public static class FxpTransfer
         return i <= 0 ? "/" : path[..i];
     }
 
-    private static List<string> MergeSkiplists(FtpClient src, FtpClient dst)
-    {
-        var srcPatterns = src.ConfiguredSkiplist();
-        var dstPatterns = dst.ConfiguredSkiplist();
-        return srcPatterns.Concat(dstPatterns)
-            .Select(x => (x ?? "").Trim())
-            .Where(x => x.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
+    // Source rules then destination rules (each already global-first): one ordered list,
+    // first match wins (cbftp).
+    private static List<SkiplistEntry> MergeSkiplists(FtpClient src, FtpClient dst) =>
+        SkiplistEntry.NormalizeList(src.ConfiguredSkiplist().Concat(dst.ConfiguredSkiplist()));
 
     private static List<string> MergeOrderLists(FtpClient src, FtpClient dst)
     {
@@ -461,18 +508,20 @@ public static class FxpTransfer
     {
         for (var i = 0; i < patterns.Count; i++)
         {
-            if (ShouldSkip(path, name, new[] { patterns[i] }))
+            // Order list (not skiplist): same plain/wildcard match as before, name or path.
+            if (PatternMatches(name, patterns[i]) || PatternMatches(path, patterns[i]))
                 return i;
         }
         return int.MaxValue;
     }
 
-    private static bool ShouldSkip(string path, string name, IEnumerable<string> patterns)
+    // isDir null = unknown type: blocked when a Deny rule hits it as file or as dir.
+    private static bool ShouldSkip(string path, string name, IReadOnlyList<SkiplistEntry> entries, bool? isDir = null)
     {
-        foreach (var pattern in patterns)
-            if (PatternMatches(name, pattern) || PatternMatches(path, pattern))
-                return true;
-        return false;
+        var entry = string.IsNullOrWhiteSpace(path) ? name : path;
+        if (isDir is bool dir) return SkiplistRules.Evaluate(entries, entry, dir).Verdict == SkiplistVerdict.Deny;
+        return SkiplistRules.Evaluate(entries, entry, false).Verdict == SkiplistVerdict.Deny ||
+               SkiplistRules.Evaluate(entries, entry, true).Verdict == SkiplistVerdict.Deny;
     }
 
     private static bool PatternMatches(string value, string pattern)

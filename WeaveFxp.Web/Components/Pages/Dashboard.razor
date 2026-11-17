@@ -129,7 +129,7 @@
 
     private void Refresh()
     {
-        Jobs = Engine.Jobs();
+        Jobs = Engine.JobsForUi();
         Sites = Engine.Sites(true);
         RecentLogs = Engine.RecentLogs(30);
     }
@@ -180,18 +180,18 @@
     }
 
     private static int RaceTotalFiles(Job job) =>
-        Math.Max(job.FilesTotal, job.Files
+        job.RaceCoverageKnown ? job.FilesTotal : Math.Max(job.FilesTotal, job.Files
             .Where(f => !IsMissingMarkerRow(f))
             .Select(f => f.Name)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Count());
 
     private static int RaceCoveredFiles(Job job) =>
-        Math.Max(job.FilesDone, job.Files
+        job.RaceCoverageKnown ? job.FilesCovered : Math.Max(job.FilesCovered, Math.Max(job.FilesDone, job.Files
             .Where(f => !IsMissingMarkerRow(f) && f.Status is "done" or "dupe")
             .Select(f => f.Name)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count());
+            .Count()));
 
     private static int RaceRacedFiles(Job job) =>
         Math.Max(job.FilesDone, job.Files.Count(f => !IsMissingMarkerRow(f) && f.Status == "done"));

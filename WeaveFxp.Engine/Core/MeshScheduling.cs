@@ -20,16 +20,37 @@ internal sealed class MeshScoreboard<T>
 internal sealed class MeshPendingDupe
 {
     public DateTime ReportedAt { get; }
-    public DateTime RetryAt { get; }
+    private DateTime _lastProgressAt;
+    private long? _lastListedSize;
 
     public MeshPendingDupe(DateTime now)
     {
         ReportedAt = now;
-        RetryAt = now.AddSeconds(15);
+        _lastProgressAt = now;
     }
 
+    // A dupe proves occupancy, not completeness. Time alone cannot make STOR safe:
+    // require a fresh disappearance of a file we actually saw after the refusal.
+    public bool ObserveListing(DateTime listingStarted, long? listedSize)
+    {
+        if (listingStarted <= ReportedAt) return false;
+        if (listedSize is null) return _lastListedSize.HasValue;
+        if (_lastListedSize != listedSize)
+        {
+            _lastListedSize = listedSize;
+            _lastProgressAt = listingStarted;
+        }
+        return false;
+    }
+
+    // Stalled occupancy can end incomplete through the normal idle/retry policy;
+    // it must neither keep the race alive forever nor generate another attempt.
+    public bool IsWaitingForProgress(DateTime now) => now < _lastProgressAt.AddSeconds(15);
+
     public bool IsConfirmedByListing(DateTime listingStarted, long listedSize, long expectedSize) =>
-        listingStarted > ReportedAt && expectedSize > 0 && listedSize >= expectedSize;
+        // A larger destination is not evidence that the smaller source is ready.
+        // Clearing occupancy here made every poll try STOR and receive another dupe.
+        listingStarted > ReportedAt && expectedSize > 0 && listedSize == expectedSize;
 }
 
 internal static class MeshScheduling

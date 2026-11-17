@@ -5,6 +5,156 @@ using WeaveFxp.Engine.Core;
 using WeaveFxp.Engine.Ftp;
 
 var passed = 0;
+if (args.Contains("--race-retry-load-tests"))
+{
+    await RaceRetryLoadTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--tls-role-tests"))
+{
+    await TlsRoleTests.Run((ok, name) => { if (!ok) throw new Exception(name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--console-startup-settings-tests"))
+{
+    ConsoleStartupSettingsTests.Run((ok, name) => { if (!ok) throw new Exception(name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--skiplist-compatibility-tests"))
+{
+    var failures = new List<string>();
+    await SkiplistCompatibilityTests.Run((ok, name) => { Console.WriteLine((ok ? "PASS: " : "FAIL: ") + name); if (!ok) failures.Add(name); });
+    if (failures.Count > 0) throw new Exception($"{failures.Count} skiplist regressions failed: " + string.Join("; ", failures));
+    return;
+}
+if (args.Contains("--ftps-metadata-tests"))
+{
+    await FollowedFxpTests.MetadataOverTls((ok, name) => { if (!ok) throw new Exception(name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--claude-regression-tests"))
+{
+    var failures = new List<string>();
+    await ClaudeRegressionTests.Run((ok, name) => { Console.WriteLine((ok ? "PASS: " : "FAIL: ") + name); if (!ok) failures.Add(name); });
+    if (failures.Count > 0) throw new Exception($"{failures.Count} Claude regressions failed: " + string.Join("; ", failures));
+    return;
+}
+if (args.Contains("--completion-recheck-tests"))
+{
+    await CompletionRecheckTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--race-finalization-snapshot-tests"))
+{
+    await RaceFinalizationTests.SnapshotFailures((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--race-finalization-tests"))
+{
+    await RaceFinalizationTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--race-manifest-tests"))
+{
+    await RaceManifestTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--race-startup-tests"))
+{
+    await RaceStartupTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--listing-isolation-tests"))
+{
+    await ListingIsolationTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--cbftp-api-fixture"))
+{
+    await using var source = new TransferServer();
+    await using var target = new TransferServer();
+    source.Files["payload.r00"] = new byte[4096];
+    source.Files["release.sfv"] = Encoding.ASCII.GetBytes("payload.r00 00000000\r\n");
+    target.Files["target-only.r01"] = new byte[64];
+    var commands = 0;
+    foreach (var fixtureServer in new[] { source, target }) fixtureServer.BeforeCommand = async cmd =>
+    {
+        if (cmd.StartsWith("STOR ") || cmd.StartsWith("RETR ")) Interlocked.Increment(ref commands);
+        await Task.Delay(cmd.StartsWith("STAT") ? 200 : 5);
+    };
+    var src = source.Site("source", true, true);
+    var dst = target.Site("target", true, true);
+    src.Sections.Add(new WeaveFxp.Engine.Models.SiteSection { Name = "TEST", Section = "/release" });
+    dst.Sections.Add(new WeaveFxp.Engine.Models.SiteSection { Name = "TEST", Section = "/release" });
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { source = src, target = dst },
+        new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower }));
+    while (await Console.In.ReadLineAsync() is string line)
+    {
+        if (line == "stop") break;
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { dataCommands = Volatile.Read(ref commands),
+            sourceFiles = source.Files.Keys.ToArray(), targetFiles = target.Files.Keys.ToArray() }));
+    }
+    return;
+}
+
+if (args.Contains("--cbftp-core-tests"))
+{
+    await CbftpCoreTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--fxp-failure-tests"))
+{
+    await FxpFailureTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--route-policy-tests"))
+{
+    await RoutePolicyTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--dupe-suppression-tests"))
+{
+    await DupeSuppressionTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--followed-fxp-tests"))
+{
+    await FollowedFxpTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+
+if (args.Contains("--ui-performance-tests"))
+{
+    void Verify(bool ok, string name) { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); }
+    UiPerformanceTests.Run(Verify);
+    await UiPerformanceTests.LargerDupe(Verify);
+    return;
+}
+if (args.Length == 2 && args[0] == "--realdata-latency-probe")
+{
+    await UiPerformanceTests.RealData(args[1]);
+    return;
+}
+if (args.Contains("--retry-recovery-tests"))
+{
+    await RetryRecoveryTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--ui-latency-probe"))
+{
+    await UiLatencyProbe.Run();
+    return;
+}
+if (args.Contains("--prewarm-tests"))
+{
+    await PoolPrewarmTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
+if (args.Contains("--mesh-tests"))
+{
+    await MeshIntegration.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
+    return;
+}
 if (args.Contains("--race-repair-tests"))
 {
     await RaceRepairTests.Run((ok, name) => { if (!ok) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
@@ -32,6 +182,7 @@ void Check(bool value, string name)
 }
 
 HistoryRetentionTests.Run();
+ConsoleStartupSettingsTests.Run(Check);
 
 var busy = new IOException("553 file.r00: file is being uploaded by another user");
 Check(FxpTransfer.IsDestinationBusyError(busy), "WeaveFTPD 553 collision is destination occupancy");
@@ -48,8 +199,14 @@ var pending = new MeshPendingDupe(now);
 Check(!pending.IsConfirmedByListing(now.AddSeconds(-1), 100, 100), "listing begun before collision cannot confirm it");
 Check(!pending.IsConfirmedByListing(now.AddSeconds(1), 50, 100), "partial destination stays pending");
 Check(!pending.IsConfirmedByListing(now.AddSeconds(1), 100, 0), "unknown expected size stays pending");
+Check(!pending.IsConfirmedByListing(now.AddSeconds(1), 200, 100), "larger destination does not reopen dupe attempts for a smaller source");
 Check(pending.IsConfirmedByListing(now.AddSeconds(1), 100, 100), "fresh full-size listing resolves occupancy");
-Check(pending.RetryAt > now && pending.RetryAt <= now.AddSeconds(15), "abandoned upload suppression is bounded");
+Check(pending.IsWaitingForProgress(now) && !pending.IsWaitingForProgress(now.AddSeconds(16)), "stalled occupancy does not keep the race alive forever");
+Check(!pending.ObserveListing(now.AddSeconds(-1), 50), "old listing cannot establish occupancy evidence");
+Check(!pending.ObserveListing(now.AddSeconds(20), null), "unlisted dupe is not reopened by a timer or an empty listing");
+Check(!pending.ObserveListing(now.AddSeconds(21), 50) && pending.IsWaitingForProgress(now.AddSeconds(22)), "fresh occupied size restarts the progress grace period");
+Check(!pending.ObserveListing(now.AddSeconds(50), 50) && !pending.IsWaitingForProgress(now.AddSeconds(50)), "unchanged occupied listing cannot extend the progress grace period forever");
+Check(pending.ObserveListing(now.AddSeconds(51), null), "fresh disappearance of an observed occupied file permits repair");
 
 Check(MeshScheduling.WorkerCount(new[] { (10, 10, 1), (10, 1, 10) }) == 10, "asymmetric sites get ten workers rather than one");
 Check(MeshScheduling.WorkerCount(new[] { (5, 5, 0), (5, 0, 5) }) == 5, "one-way routes use directional capacity");
@@ -155,11 +312,29 @@ using (var reserved = pairSource.TryReserveTransferSlot("handoff", true))
 Check(pairSource.CanBorrowTransfer("next", true), "returned client restores handed-off permits");
 await pairSource.SweepAsync(TimeSpan.FromSeconds(-1), TimeSpan.Zero);
 GlobalScoreboardTests.Run(Check);
+await PoolPrewarmTests.Run(Check);
 await ManualQueueTests.Run(Check);
 await UploadTests.Run(Check);
 await SiteSearchTests.Run(Check);
 await MeshIntegration.Run(Check);
+await CbftpCoreTests.Run(Check);
+await RoutePolicyTests.Run(Check);
+await DupeSuppressionTests.Run(Check);
+await FollowedFxpTests.Run(Check);
+await FxpFailureTests.Run(Check);
+await TlsRoleTests.Run(Check);
+await ListingIsolationTests.Run(Check);
+await RaceStartupTests.Run(Check);
+await RaceManifestTests.Run(Check);
 await RaceRepairTests.Run(Check);
+await RaceFinalizationTests.Run(Check);
+await CompletionRecheckTests.Run(Check);
+await ClaudeRegressionTests.Run(Check);
+await SkiplistCompatibilityTests.Run(Check);
+await RetryRecoveryTests.Run(Check);
+await RaceRetryLoadTests.Run(Check);
+UiPerformanceTests.Run(Check);
+await UiPerformanceTests.LargerDupe(Check);
 Console.WriteLine($"{passed} regression checks passed.");
 
 sealed class LoginServer : IAsyncDisposable

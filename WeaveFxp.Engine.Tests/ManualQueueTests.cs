@@ -141,6 +141,9 @@ internal static class ManualQueueTests
             blocked = new(TaskCreationOptions.RunContinuationsAsynchronously);
             release = new(TaskCreationOptions.RunContinuationsAsynchronously);
             jobs.Clear();
+            // SIZE now reports real fixture sizes; remove the previous completed
+            // download so this phase actually exercises an active RETR again.
+            File.Delete(Path.Combine(root, "block.bin"));
             jobs.Add(Start("block"));
             await blocked.Task.WaitAsync(TimeSpan.FromSeconds(8));
             jobs.Add(Start("first"));

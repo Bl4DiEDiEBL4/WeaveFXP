@@ -76,14 +76,19 @@ public static class CbftpSiteImporter
 
         if (TryProperty(root, out var skiplist, "skiplist") && skiplist.ValueKind == JsonValueKind.Array)
         {
-            site.Skiplist = skiplist.EnumerateArray()
+            // cbftp rules keep their order, regex flag, file/dir scope and action.
+            site.Skiplist = SkiplistEntry.NormalizeList(skiplist.EnumerateArray()
                 .Where(row => row.ValueKind is JsonValueKind.String or JsonValueKind.Object)
-                .Where(row => row.ValueKind != JsonValueKind.Object ||
-                              !String(row, "action").Equals("ALLOW", StringComparison.OrdinalIgnoreCase))
-                .Select(row => row.ValueKind == JsonValueKind.String ? row.GetString() ?? "" : String(row, "pattern"))
-                .Where(pattern => !string.IsNullOrWhiteSpace(pattern))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+                .Select(row => row.ValueKind == JsonValueKind.String
+                    ? SkiplistEntry.DenyPattern(row.GetString() ?? "")
+                    : new SkiplistEntry
+                    {
+                        Pattern = String(row, "pattern"),
+                        Regex = TryBool(row, out var rx, "regex") && rx,
+                        File = !TryBool(row, out var file, "file") || file,
+                        Dir = !TryBool(row, out var dir, "dir") || dir,
+                        Action = SkiplistEntry.ParseAction(String(row, "action")),
+                    }));
         }
 
         return site.WithDefaults();
